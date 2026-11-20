@@ -5,6 +5,7 @@ repeats until Claude has enough to answer.
 """
 
 import logging
+from collections.abc import AsyncIterator
 from datetime import date
 
 from anthropic import AsyncAnthropic
@@ -86,6 +87,15 @@ class Analyst:
         self.settings = settings
 
     async def answer(self, question: str) -> Answer:
+        """Work through the question and return the final answer."""
+        async for event in self.stream(question):
+            if isinstance(event, Answer):
+                return event
+        # stream() always ends with an Answer or raises, so this line is never reached.
+        raise AgentError("The loop ended without an answer.")
+
+    async def stream(self, question: str) -> AsyncIterator[ExecutedQuery | Answer]:
+        """Work through the question, yielding each query as it finishes and the answer last."""
         messages: list[MessageParam] = [{"role": "user", "content": question}]
         queries: list[ExecutedQuery] = []
         system: list[TextBlockParam] = [
@@ -116,7 +126,8 @@ class Analyst:
                 text = "".join(block.text for block in response.content if block.type == "text")
                 if not text.strip():
                     raise AgentError("The model returned no answer.")
-                return Answer(answer=text, queries=queries)
+                yield Answer(answer=text, queries=queries)
+                return
             if response.stop_reason != "tool_use":
                 # Cut off by max_tokens: there is no trustworthy answer to return.
                 raise AgentError(f"The model stopped early ({response.stop_reason}).")
@@ -131,7 +142,8 @@ class Analyst:
                 logger.info(
                     "run_sql: %s -> %s", call.sql, result.error or f"{len(result.rows)} rows"
                 )
-                queries.append(ExecutedQuery(purpose=call.purpose, sql=call.sql, result=result))
+                executed = ExecutedQuery(purpose=call.purpose, sql=call.sql, result=result)
+                queries.append(executed)
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -140,6 +152,7 @@ class Analyst:
                         "is_error": result.error is not None,
                     }
                 )
+                yield executed
             # Every result of this turn goes back in one message.
             messages.append({"role": "user", "content": tool_results})
 

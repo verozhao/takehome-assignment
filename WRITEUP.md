@@ -50,16 +50,17 @@ the data shows no growth in film length. It is safe by default, every answer can
 audited, and the code is small enough to read in one sitting.
 
 I am less happy with three things. The eval has only eight questions, and three of them have
-no reference answer, so I judged those by reading. A question takes 5 to 18 seconds and the
-client sees nothing until it is done. Follow-up questions do not work because requests are
-independent.
+no reference answer, so I judged those by reading. A question takes 5 to 18 seconds. The
+streaming endpoint shows each query as it runs, but the answer still arrives in one piece.
+Follow-up questions do not work because requests are independent.
 
 ## 3. What would I do differently?
 
 - Write the eval set before the agent and make it larger, so every prompt change is measured.
 - Compare cheaper models and lower effort settings against that eval before settling on the
   most capable model.
-- Stream the steps to the client.
+- Return the reading of the question as its own field, and trace each figure in the answer
+  to its query in code. `DESIGN.md` explains why I prefer that to a confidence score.
 - Add conversation state for follow-up questions.
 
 ## 4. Where did I get stuck?

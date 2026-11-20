@@ -1,7 +1,8 @@
 """The HTTP layer. The analyst is replaced, so neither Postgres nor Claude is needed,
 except in the last test, which starts the real service against Pagila."""
 
-from collections.abc import Iterator
+import json
+from collections.abc import AsyncIterator, Iterator
 
 import anthropic
 import httpx2
@@ -21,6 +22,13 @@ class FakeAnalyst:
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
+
+    async def stream(self, question: str) -> AsyncIterator[ExecutedQuery | Answer]:
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        for query in self.outcome.queries:
+            yield query
+        yield self.outcome
 
 
 @pytest.fixture
@@ -60,6 +68,46 @@ def test_ask_returns_the_answer_and_the_queries_behind_it(client: TestClient):
             }
         ],
     }
+
+
+def test_stream_sends_each_query_and_then_the_answer(client: TestClient):
+    query = ExecutedQuery(
+        purpose="Count the films.",
+        sql="SELECT count(*) FROM film",
+        result=QueryResult(columns=["count"], rows=[[1000]]),
+    )
+    use_analyst(Answer(answer="There are 1,000 films.", queries=[query]))
+
+    response = client.post("/ask/stream", json={"question": "How many films are there?"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = [event.split("\ndata: ") for event in response.text.strip().split("\n\n")]
+    assert [name for name, _ in events] == ["event: started", "event: query", "event: answer"]
+    assert json.loads(events[1][1])["purpose"] == "Count the films."
+    assert json.loads(events[2][1])["answer"] == "There are 1,000 films."
+
+
+@pytest.mark.parametrize(
+    ("failure", "status"),
+    [
+        (AgentError("No answer after 10 steps."), 502),
+        (QuestionDeclined("The model declined to answer this question."), 422),
+    ],
+)
+def test_stream_reports_a_failure_as_an_event(client: TestClient, failure: AgentError, status: int):
+    use_analyst(failure)
+
+    response = client.post("/ask/stream", json={"question": "Something hard"})
+
+    # The HTTP status is already sent when the failure happens, so it arrives as an event
+    # that carries the status the plain endpoint would have returned.
+    assert response.status_code == 200
+    last_event = response.text.strip().split("\n\n")[-1]
+    assert (
+        last_event
+        == f"event: error\ndata: {json.dumps({'status': status, 'detail': str(failure)})}"
+    )
 
 
 @pytest.mark.parametrize("question", ["", "  \n "])
