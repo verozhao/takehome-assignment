@@ -195,6 +195,7 @@ every step visible and easy to debug.
 
 ```bash
 pytest                 # 49 tests. Most of them need Pagila running.
+mypy app evals         # type check
 python -m evals.run    # live: needs the service running, costs about 30 cents
 ```
 

@@ -1,6 +1,8 @@
 """The HTTP layer. The analyst is replaced, so neither Postgres nor Claude is needed,
 except in the last test, which starts the real service against Pagila."""
 
+from collections.abc import Iterator
+
 import anthropic
 import httpx2
 import pytest
@@ -12,7 +14,7 @@ from app.main import app, get_analyst
 
 
 class FakeAnalyst:
-    def __init__(self, outcome: Answer | Exception):
+    def __init__(self, outcome: Answer | Exception) -> None:
         self.outcome = outcome
 
     async def answer(self, question: str) -> Answer:
@@ -22,7 +24,7 @@ class FakeAnalyst:
 
 
 @pytest.fixture
-def client():
+def client() -> Iterator[TestClient]:
     # No `with` block, so the startup code that connects to Postgres does not run.
     yield TestClient(app)
     app.dependency_overrides.clear()
@@ -97,7 +99,7 @@ def test_a_claude_api_failure_is_bad_gateway_without_upstream_details(client: Te
     assert "secret upstream detail" not in response.text
 
 
-def test_the_service_starts_and_gives_the_model_the_schema(monkeypatch):
+def test_the_service_starts_and_gives_the_model_the_schema(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")  # startup makes no call to Claude
 
     with TestClient(app) as started:

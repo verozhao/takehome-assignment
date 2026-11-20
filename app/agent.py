@@ -41,6 +41,13 @@ RUN_SQL_TOOL: ToolParam = {
 }
 
 
+class RunSqlInput(BaseModel):
+    """What the model passes to run_sql. The SDK hands it over as an untyped dict."""
+
+    purpose: str
+    sql: str
+
+
 class AgentError(Exception):
     """The model stopped without producing an answer."""
 
@@ -65,7 +72,7 @@ class Answer(BaseModel):
 class Analyst:
     def __init__(
         self, client: AsyncAnthropic, database: Database, system_prompt: str, settings: Settings
-    ):
+    ) -> None:
         self.client = client
         self.database = database
         self.system_prompt = system_prompt
@@ -112,12 +119,12 @@ class Analyst:
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                sql = block.input["sql"]
-                result = await self.database.run_query(sql)
-                logger.info("run_sql: %s -> %s", sql, result.error or f"{len(result.rows)} rows")
-                queries.append(
-                    ExecutedQuery(purpose=block.input["purpose"], sql=sql, result=result)
+                call = RunSqlInput.model_validate(block.input)
+                result = await self.database.run_query(call.sql)
+                logger.info(
+                    "run_sql: %s -> %s", call.sql, result.error or f"{len(result.rows)} rows"
                 )
+                queries.append(ExecutedQuery(purpose=call.purpose, sql=call.sql, result=result))
                 tool_results.append(
                     {
                         "type": "tool_result",

@@ -1,6 +1,7 @@
 """The agent loop, driven by a scripted stand-in for Claude so no network is needed."""
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -33,18 +34,18 @@ def reply(stop_reason: str, *blocks: SimpleNamespace) -> SimpleNamespace:
 class ScriptedClaude:
     """Plays back prepared responses and records the messages it was sent."""
 
-    def __init__(self, *responses: SimpleNamespace):
+    def __init__(self, *responses: SimpleNamespace) -> None:
         self.responses = list(responses)
         self.sent: list[list] = []
         self.messages = self  # so client.messages.create(...) lands on create() below
 
-    async def create(self, **request):
+    async def create(self, **request: Any) -> SimpleNamespace:
         self.sent.append(list(request["messages"]))
         return self.responses.pop(0)
 
 
 class FakeDatabase:
-    def __init__(self, *results: QueryResult):
+    def __init__(self, *results: QueryResult) -> None:
         self.results = list(results)
 
     async def run_query(self, sql: str) -> QueryResult:

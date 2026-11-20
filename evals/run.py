@@ -124,7 +124,7 @@ def missing_values(expected: list[str], answer: dict) -> list[str]:
 
 async def main() -> None:
     # The reference queries cost nothing, so they run before any question is asked.
-    database = await asyncpg.connect(Settings().database_url)
+    database: asyncpg.Connection = await asyncpg.connect(Settings().database_url)
     references = [await reference_values(database, sql) for _, sql in GRADED]
     await database.close()
 

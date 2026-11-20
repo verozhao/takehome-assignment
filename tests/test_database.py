@@ -4,7 +4,9 @@ The write tests send real DELETE and UPDATE statements and expect them to be ref
 Run them as a superuser only against a Pagila you can throw away.
 """
 
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import asyncpg
 import pytest
@@ -13,17 +15,17 @@ from app.config import Settings
 from app.database import Database
 
 
-def settings(**overrides) -> Settings:
+def settings(**overrides: Any) -> Settings:
     # DATABASE_URL comes from the environment or .env. No API key is needed here.
     return Settings(anthropic_api_key="unused", **overrides)
 
 
-async def connect(**overrides) -> Database:
+async def connect(**overrides: Any) -> Database:
     return await Database.connect(settings(**overrides))
 
 
 @pytest.fixture
-async def database():
+async def database() -> AsyncIterator[Database]:
     database = await connect()
     yield database
     await database.close()
