@@ -11,12 +11,12 @@ A goal-based agent that calls one tool.
 - **Goal:** an answer to the question that is backed by query results.
 - **Tool:** `run_sql(purpose, sql)`. The model chooses each query by what it still needs to
   know, reads the result, and decides whether it has enough.
-- **State:** the schema and the conversation so far, inside one request. Nothing is kept
-  between requests.
+- **State:** the schema and the conversation so far, inside one request. Between requests
+  the service keeps the stored record of each answer, and a follow-up is rebuilt from it.
 - **Limits:** steps, rows, result size and time are hard caps set in code.
 
 It has no retrieval, no reranking, no model routing, no MCP, no self-hosted model, no memory
-across requests and no second agent. Each of those solves a specific problem. This service
+beyond those records and no second agent. Each of those solves a specific problem. This service
 does not have those problems yet, and every component added also adds ways to fail and
 things to evaluate.
 
@@ -49,9 +49,10 @@ AI. In the order I would build it:
    calls and queries together, and caps on rows and result size. Nothing bounds a user yet.
    Production needs rate and spend limits per caller and a cap on concurrent questions.
 5. **An eval that gates every change.** Postgres catches invalid SQL. Nothing catches valid
-   SQL that answers a different question. The eval here grades twelve questions, can repeat
-   each one, and fails its run when any attempt fails. That is the mechanism. Production
-   needs a few hundred real questions behind it, run on every change of prompt or model.
+   SQL that answers a different question. The eval here grades twelve questions with a value
+   check and a judge model, can repeat each one, and fails its run when any attempt fails.
+   That is the mechanism. Production needs a few hundred real questions behind it, run on
+   every change of prompt or model.
 6. **Business meaning.** The schema says which columns exist and not what the business
    means by them. This database already shows it: `active = 1` matches 966 customers and
    `activebool` matches 987, so "how many active customers" has two defensible answers.
@@ -83,7 +84,10 @@ retrieval does, and only pays when the right item is found but ranked too low to
 objects to, plus an eval that shows a cheaper setting passes a named class of questions. I
 would pull the levers in this order: lower effort on the same model, then one cheaper model
 per deployment, and a router last. A router that sends a hard question to the weak model
-fails silently, and the same question should give the same number on two days.
+fails silently, and the same question should give the same number on two days. A first
+measurement is in the README. On the twelve eval questions, medium effort and Sonnet 5.5
+passed the same checks as the default at lower cost, which is a reason to build the larger
+eval and not yet a reason to switch.
 
 **MCP.** A protocol for offering tools to model clients. It solves distribution and adds no
 capability. The trigger is a second consumer, such as another team's assistant, that wants
