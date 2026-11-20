@@ -1,16 +1,25 @@
-"""The database layer against a running Pagila (see the README for how to start it)."""
+"""The database layer against a running Pagila (see the README for how to start it).
+
+The write tests send real DELETE and UPDATE statements and expect them to be refused.
+Run them as a superuser only against a Pagila you can throw away.
+"""
 
 from pathlib import Path
 
+import asyncpg
 import pytest
 
 from app.config import Settings
 from app.database import Database
 
 
-async def connect(**overrides) -> Database:
+def settings(**overrides) -> Settings:
     # DATABASE_URL comes from the environment or .env. No API key is needed here.
-    return await Database.connect(Settings(anthropic_api_key="unused", **overrides))
+    return Settings(anthropic_api_key="unused", **overrides)
+
+
+async def connect(**overrides) -> Database:
+    return await Database.connect(settings(**overrides))
 
 
 @pytest.fixture
@@ -45,7 +54,8 @@ async def test_schema_spells_out_enum_values_and_quotes_odd_names(database: Data
 
 
 def test_application_code_knows_nothing_about_this_database():
-    source = "".join(path.read_text() for path in Path("app").glob("*.py")).lower()
+    app_dir = Path(__file__).parent.parent / "app"
+    source = "".join(path.read_text() for path in app_dir.glob("*.py")).lower()
 
     for name in ("pagila", "film", "actor", "rental", "payment", "customer"):
         assert name not in source
@@ -66,6 +76,15 @@ async def test_values_are_json_safe(database: Database):
     assert result.rows == [["1.50", "2024-01-02"]]
 
 
+async def test_intervals_keep_their_months(database: Database):
+    result = await database.run_query(
+        "SELECT age(DATE '2024-03-01', DATE '2024-02-01') AS gap, "
+        "INTERVAL '-3 days -4 hours' AS late"
+    )
+
+    assert result.rows == [["1 mon", "-3 days -04:00:00"]]
+
+
 async def test_columns_with_the_same_name_are_all_kept(database: Database):
     result = await database.run_query("SELECT 1 AS n, 2 AS n")
 
@@ -76,10 +95,13 @@ async def test_columns_with_the_same_name_are_all_kept(database: Database):
 async def test_long_results_are_cut_off_and_flagged():
     database = await connect(max_rows=5)
 
-    result = await database.run_query("SELECT film_id FROM film ORDER BY film_id")
+    too_long = await database.run_query("SELECT film_id FROM film ORDER BY film_id")
+    exactly_the_cap = await database.run_query("SELECT film_id FROM film LIMIT 5")
 
-    assert len(result.rows) == 5
-    assert result.truncated is True
+    assert len(too_long.rows) == 5
+    assert too_long.truncated is True
+    assert len(exactly_the_cap.rows) == 5
+    assert exactly_the_cap.truncated is False
     await database.close()
 
 
@@ -99,6 +121,26 @@ async def test_sql_mistakes_come_back_as_errors(database: Database):
     assert 'column "no_such_column" does not exist' in result.error
 
 
+async def test_a_long_error_message_is_cut_short(database: Database):
+    result = await database.run_query("SELECT repeat('x', 100000)::integer")
+
+    assert result.error.startswith("invalid input syntax")
+    assert len(result.error) <= 2000
+
+
+async def test_queries_run_in_a_read_only_transaction_whatever_the_role_allows():
+    # Switch off the role's own read-only default, so only the code can turn it on.
+    pool = await asyncpg.create_pool(
+        settings().database_url, server_settings={"default_transaction_read_only": "off"}
+    )
+    database = Database(pool, max_rows=100, max_result_chars=40_000)
+
+    result = await database.run_query("SHOW transaction_read_only")
+
+    assert result.rows == [["on"]]
+    await database.close()
+
+
 @pytest.mark.parametrize(
     "sql",
     [
@@ -110,6 +152,9 @@ async def test_sql_mistakes_come_back_as_errors(database: Database):
         "DROP TABLE film_actor",
         "CREATE TABLE scratch (id integer)",
         "SELECT * INTO scratch FROM language",
+        # EXPLAIN ANALYZE runs its statement, and this one gets past a read-only transaction.
+        "EXPLAIN ANALYZE CREATE TABLE scratch AS SELECT 1 AS id",
+        "EXPLAIN ANALYZE CREATE TEMP TABLE scratch AS SELECT 1 AS id",
     ],
 )
 async def test_writes_are_rejected(database: Database, sql: str):
@@ -129,9 +174,13 @@ async def test_writes_are_rejected(database: Database, sql: str):
         "COPY (SELECT 1) TO PROGRAM 'true'",
         "DO $$ BEGIN PERFORM 1; END $$",
         "SELECT 1; SELECT 2",
+        "SELECT $1::integer",
+        "EXPLAIN SELECT 1",
     ],
 )
-async def test_statements_that_are_not_a_single_query_are_rejected(database: Database, sql: str):
+async def test_statements_that_are_not_a_single_plain_query_are_rejected(
+    database: Database, sql: str
+):
     result = await database.run_query(sql)
 
     assert result.error is not None

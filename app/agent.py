@@ -45,6 +45,10 @@ class AgentError(Exception):
     """The model stopped without producing an answer."""
 
 
+class QuestionDeclined(AgentError):
+    """The model refused the question itself."""
+
+
 class ExecutedQuery(BaseModel):
     """A query the model ran and what came back. Together they are the audit trail of an answer."""
 
@@ -92,11 +96,15 @@ class Analyst:
             )
             log_step(step, response)
 
+            if response.stop_reason == "refusal":
+                raise QuestionDeclined("The model declined to answer this question.")
             if response.stop_reason == "end_turn":
                 text = "".join(block.text for block in response.content if block.type == "text")
+                if not text.strip():
+                    raise AgentError("The model returned no answer.")
                 return Answer(answer=text, queries=queries)
             if response.stop_reason != "tool_use":
-                # max_tokens or refusal: there is no trustworthy answer to return.
+                # Cut off by max_tokens: there is no trustworthy answer to return.
                 raise AgentError(f"The model stopped early ({response.stop_reason}).")
 
             messages.append({"role": "assistant", "content": response.content})

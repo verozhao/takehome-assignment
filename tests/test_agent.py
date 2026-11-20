@@ -4,19 +4,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent import AgentError, Analyst, ExecutedQuery
+from app.agent import AgentError, Analyst, ExecutedQuery, QuestionDeclined
 from app.config import Settings
 from app.database import QueryResult
+
+
+def thinking() -> SimpleNamespace:
+    return SimpleNamespace(type="thinking", thinking="", signature="signature")
+
+
+def text(value: str) -> SimpleNamespace:
+    return SimpleNamespace(type="text", text=value)
 
 
 def tool_use(sql: str, call_id: str = "call_1") -> SimpleNamespace:
     return SimpleNamespace(
         type="tool_use", id=call_id, name="run_sql", input={"purpose": "test", "sql": sql}
     )
-
-
-def text(value: str) -> SimpleNamespace:
-    return SimpleNamespace(type="text", text=value)
 
 
 def reply(stop_reason: str, *blocks: SimpleNamespace) -> SimpleNamespace:
@@ -48,15 +52,21 @@ class FakeDatabase:
 
 
 def make_analyst(claude: ScriptedClaude, database: FakeDatabase, max_steps: int = 10) -> Analyst:
-    settings = Settings(_env_file=None, anthropic_api_key="unused", max_steps=max_steps)
+    settings = Settings(
+        _env_file=None,
+        anthropic_api_key="unused",
+        database_url="postgresql://unused",
+        max_steps=max_steps,
+    )
     return Analyst(client=claude, database=database, system_prompt="prompt", settings=settings)
 
 
 async def test_runs_the_query_and_returns_the_answer_with_its_trace():
     result = QueryResult(columns=["count"], rows=[[1000]])
+    # A real reply mixes thinking, text and tool calls, so the script does too.
     claude = ScriptedClaude(
-        reply("tool_use", tool_use("SELECT count(*) FROM film")),
-        reply("end_turn", text("There are 1,000 films.")),
+        reply("tool_use", thinking(), text("Let me count."), tool_use("SELECT count(*) FROM film")),
+        reply("end_turn", thinking(), text("There are 1,000 films.")),
     )
 
     answer = await make_analyst(claude, FakeDatabase(result)).answer("How many films are there?")
@@ -114,10 +124,25 @@ async def test_gives_up_when_the_step_limit_is_reached():
     with pytest.raises(AgentError, match="No answer after 2 steps"):
         await make_analyst(claude, FakeDatabase(result, result), max_steps=2).answer("Loop")
 
+    assert len(claude.sent) == 2
 
-@pytest.mark.parametrize("stop_reason", ["max_tokens", "refusal"])
-async def test_an_incomplete_response_is_an_error_and_never_an_answer(stop_reason: str):
-    claude = ScriptedClaude(reply(stop_reason, text("The answer is probably")))
 
-    with pytest.raises(AgentError, match=stop_reason):
+async def test_a_response_cut_off_by_the_token_limit_is_an_error_and_never_an_answer():
+    claude = ScriptedClaude(reply("max_tokens", text("The answer is probably")))
+
+    with pytest.raises(AgentError, match="max_tokens"):
+        await make_analyst(claude, FakeDatabase()).answer("Anything")
+
+
+async def test_a_final_turn_without_text_is_an_error():
+    claude = ScriptedClaude(reply("end_turn", thinking()))
+
+    with pytest.raises(AgentError, match="no answer"):
+        await make_analyst(claude, FakeDatabase()).answer("Anything")
+
+
+async def test_a_refusal_is_reported_as_a_declined_question():
+    claude = ScriptedClaude(reply("refusal"))
+
+    with pytest.raises(QuestionDeclined):
         await make_analyst(claude, FakeDatabase()).answer("Anything")

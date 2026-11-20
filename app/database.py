@@ -49,6 +49,9 @@ ORDER BY relation, con.contype DESC, definition
 """
 
 
+MAX_ERROR_CHARS = 2_000
+
+
 class QueryResult(BaseModel):
     columns: list[str] = []
     rows: list[list[Any]] = []
@@ -74,6 +77,7 @@ class Database:
             settings.database_url,
             # A session default, so it is restored whenever a connection returns to the pool.
             server_settings={"statement_timeout": f"{settings.statement_timeout_ms}ms"},
+            init=keep_interval_text,
         )
         return cls(pool, settings.max_rows, settings.max_result_chars)
 
@@ -111,20 +115,23 @@ class Database:
         Problems with the SQL itself are returned in `error` instead of raised,
         because the model reads them and corrects its own query.
         """
-        try:
-            async with self.pool.acquire() as conn, conn.transaction(readonly=True):
-                # Postgres parses the statement here, so a syntax error or several
-                # statements in one string fail before anything runs.
-                statement = await conn.prepare(sql)
-                columns = [attribute.name for attribute in statement.get_attributes()]
-                if not columns:
-                    # SET, COPY, DO and similar commands return no columns.
-                    return QueryResult(error="Only queries that return rows are allowed.")
-                cursor = await statement.cursor()
-                # One row more than the cap tells us whether the result was cut off.
-                records = await cursor.fetch(self.max_rows + 1)
-        except asyncpg.PostgresError as exc:
-            return QueryResult(error=str(exc))
+        # Failing to get a connection is not the model's mistake, so that is raised.
+        async with self.pool.acquire() as conn:
+            try:
+                async with conn.transaction(readonly=True):
+                    # Postgres parses the statement here, so a syntax error or several
+                    # statements in one string fail before anything runs.
+                    statement = await conn.prepare(sql)
+                    columns = [attribute.name for attribute in statement.get_attributes()]
+                    refusal = reason_to_refuse(columns, statement.get_parameters())
+                    if refusal:
+                        return QueryResult(error=refusal)
+                    cursor = await statement.cursor()
+                    # One row more than the cap tells us whether the result was cut off.
+                    records = await cursor.fetch(self.max_rows + 1)
+            except asyncpg.PostgresError as exc:
+                # Some messages quote the offending value, so an error can be as long as the data.
+                return QueryResult(error=str(exc)[:MAX_ERROR_CHARS])
 
         rows = [list(record.values()) for record in records[: self.max_rows]]
         # Decimal, date and other Postgres types are not JSON types. Serialising once,
@@ -142,3 +149,25 @@ class Database:
             rows=json.loads(encoded),
             truncated=len(records) > self.max_rows,
         )
+
+
+def reason_to_refuse(columns: list[str], parameters: tuple) -> str | None:
+    """Statements that Postgres accepts but that are not plain queries."""
+    if not columns:
+        # SET, COPY, DO and similar commands return no columns.
+        return "Only queries that return rows are allowed."
+    if columns == ["QUERY PLAN"]:
+        # EXPLAIN ANALYZE executes its statement, and a CREATE TABLE AS under it
+        # is not stopped by the read-only transaction.
+        return "EXPLAIN is not allowed."
+    if parameters:
+        return "Placeholders such as $1 are not supported. Write the values into the SQL."
+    return None
+
+
+async def keep_interval_text(conn: asyncpg.Connection) -> None:
+    # asyncpg turns an interval into a timedelta, which has no months, so "1 mon"
+    # would arrive as 30 days. Keep the text Postgres prints instead.
+    await conn.set_type_codec(
+        "interval", schema="pg_catalog", encoder=str, decoder=str, format="text"
+    )

@@ -8,9 +8,9 @@ from typing import Annotated
 import anthropic
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent import AgentError, Analyst, Answer
+from app.agent import AgentError, Analyst, Answer, QuestionDeclined
 from app.config import Settings
 from app.database import Database
 from app.prompt import build_system_prompt
@@ -18,6 +18,7 @@ from app.prompt import build_system_prompt
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 # The SDK's HTTP client logs every request. The agent already logs each step.
 logging.getLogger("httpx2").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -29,7 +30,9 @@ async def lifespan(app: FastAPI):
     app.state.database = database
     app.state.schema = schema
     app.state.analyst = Analyst(
-        client=anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
+        client=anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key, timeout=settings.model_timeout_seconds
+        ),
         database=database,
         system_prompt=build_system_prompt(schema, settings),
         settings=settings,
@@ -42,6 +45,8 @@ app = FastAPI(title="Ask your database", lifespan=lifespan)
 
 
 class Question(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     question: str = Field(
         min_length=1, max_length=2000, examples=["Which table has the most rows?"]
     )
@@ -68,6 +73,11 @@ async def health(request: Request) -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.exception_handler(QuestionDeclined)
+async def question_declined(request: Request, exc: QuestionDeclined) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 @app.exception_handler(AgentError)
 async def agent_error(request: Request, exc: AgentError) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
@@ -75,4 +85,9 @@ async def agent_error(request: Request, exc: AgentError) -> JSONResponse:
 
 @app.exception_handler(anthropic.APIError)
 async def claude_api_error(request: Request, exc: anthropic.APIError) -> JSONResponse:
-    return JSONResponse(status_code=502, content={"detail": f"Claude API error: {exc.message}"})
+    # The SDK's message quotes the upstream response, so it goes to the log and not to the caller.
+    logger.error("Claude API call failed: %s", exc)
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "The request to the language model failed. See the service log."},
+    )

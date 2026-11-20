@@ -4,6 +4,11 @@ A graded case passes when every value returned by its reference SQL shows up bot
 in the answer text and in the rows the agent fetched. The expected values are
 computed when the eval runs, so none of them is typed in by hand.
 
+The check only looks for the reference values. It does not notice extra names,
+which customer is called the highest and which the lowest, or the conclusion
+drawn about film lengths. Every answer is printed at the end so that a person
+can read those.
+
 Probes have no reference. They are printed so a person can read how the service
 handles questions it should not be able to answer.
 
@@ -56,6 +61,7 @@ SELECT min(release_year), max(release_year), round(avg(length))
 FROM film
 """
 
+# Customers with no payment at all are left out, because the question asks who has paid.
 HIGHEST_AND_LOWEST_PAYING_CUSTOMER = """
 WITH totals AS (
     SELECT c.first_name, c.last_name, sum(p.amount) AS total
@@ -90,11 +96,21 @@ PROBES = [
 ]
 
 
+async def reference_values(database: asyncpg.Connection, sql: str) -> list[str]:
+    values = [str(value) for row in await database.fetch(sql) for value in row]
+    if not values:
+        sys.exit(f"A reference query returned no rows, so nothing can be graded:\n{sql}")
+    return values
+
+
 async def ask(api: httpx.AsyncClient, question: str) -> tuple[dict, float]:
     started = time.perf_counter()
     response = await api.post("/ask", json={"question": question})
-    response.raise_for_status()
-    return response.json(), time.perf_counter() - started
+    seconds = time.perf_counter() - started
+    if response.status_code != 200:
+        # The service could not answer. That fails this case and the run goes on.
+        return {"answer": f"HTTP {response.status_code}: {response.text}", "queries": []}, seconds
+    return response.json(), seconds
 
 
 def missing_values(expected: list[str], answer: dict) -> list[str]:
@@ -107,21 +123,23 @@ def missing_values(expected: list[str], answer: dict) -> list[str]:
 
 
 async def main() -> None:
+    # The reference queries cost nothing, so they run before any question is asked.
+    database = await asyncpg.connect(Settings().database_url)
+    references = [await reference_values(database, sql) for _, sql in GRADED]
+    await database.close()
+
     questions = [question for question, _ in GRADED + PROBES]
     async with httpx.AsyncClient(base_url=API_URL, timeout=300) as api:
         results = await asyncio.gather(*(ask(api, question) for question in questions))
 
-    database = await asyncpg.connect(Settings().database_url)
     failed = 0
-    for (question, reference_sql), (answer, seconds) in zip(GRADED, results):
-        expected = [str(value) for row in await database.fetch(reference_sql) for value in row]
+    for (question, _), expected, (answer, seconds) in zip(GRADED, references, results):
         missing = missing_values(expected, answer)
         failed += bool(missing)
         verdict = "FAIL" if missing else "PASS"
         print(f"{verdict}  {seconds:5.1f}s  {len(answer['queries'])} queries  {question}")
         if missing:
             print(f"      missing: {', '.join(missing)}")
-    await database.close()
 
     for (question, good_answer), (answer, seconds) in zip(PROBES, results[len(GRADED) :]):
         print(f"READ  {seconds:5.1f}s  {len(answer['queries'])} queries  {question}")
