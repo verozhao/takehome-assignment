@@ -17,6 +17,7 @@ curl -s localhost:8000/ask -H 'content-type: application/json' \
 
 ```json
 {
+  "id": "0c1f4a2e9b7d4e6f8a3b5c7d9e1f2a4b",
   "answer": "**Karl Seal (customer 526) has paid the most: $358.12 across 88 payments. Mateo Scott (customer 624) has paid the least of anyone who has paid at all: $0.99 for a single payment.** [...] Two of the 999 customers have paid nothing. They are Jennifer Mitchell (647) and Sofia Baker (978) [...]",
   "queries": [
     {
@@ -138,6 +139,44 @@ On the film length question the two queries arrived after 3.7 and 8.1 seconds an
 after 17.3. A failure arrives as an `error` event that carries the status `POST /ask` would
 have returned. A stream that ends without an `answer` or `error` event means the service
 itself failed.
+
+## The record of every answer
+
+Every question leaves one line in `audit.jsonl`, however it ends. The `id` in the response
+is the id of that line, so a figure someone questions later can be traced to what produced
+it.
+
+```json
+{
+  "id": "47e8d5b6aabb4750bdba817990ecb558",
+  "asked_at": "2026-11-20T15:38:07.961385Z",
+  "seconds": 5.31,
+  "question": "What actors were in Chocolat Harry?",
+  "model": "claude-opus-5-5",
+  "prompt_sha256": "d58c4340a608ba251bfcb68030ec88983058cc00e0447e1e6508d1ff5b6937d7",
+  "queries": [
+    {
+      "purpose": "Find the film and its actors.",
+      "sql": "SELECT f.film_id, f.title, a.actor_id, a.first_name, a.last_ [...]",
+      "row_count": 5,
+      "truncated": false,
+      "error": null,
+      "rows_sha256": "d87fc5988f4cecb1b6c976bccaaa58fc3b6b4fcd4a9e0f6364997fbf461beecc"
+    }
+  ],
+  "outcome": "answered",
+  "detail": null,
+  "answer": "Five actors are listed for **Chocolat Harry** (film ID 147): [...]"
+}
+```
+
+The record keeps the SQL and a hash of each result. It does not keep the rows. The prompt
+hash identifies the exact rules and schema text the model was given. The outcome is
+`answered`, `declined`, `failed` or `cancelled`. A caller who disconnects in the middle of
+a stream is recorded as cancelled, with the queries that had run by then.
+
+The SQL text can contain names and values, so this file needs the same care as the data.
+Set its location with `AUDIT_LOG_PATH`.
 
 ## How it works
 
@@ -303,6 +342,7 @@ order, and what I would keep out. The limits of the code as it stands:
 app/
   main.py        FastAPI app and endpoints
   agent.py       the tool loop
+  audit.py       the stored record of every question
   prompt.py      the system prompt
   database.py    schema description and guarded query execution
   config.py      settings

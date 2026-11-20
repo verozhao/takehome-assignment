@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # How hard the model thinks before it acts.
     reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
+    # One line is appended here for every question. See app/audit.py.
+    audit_log_path: str = "audit.jsonl"
+
     # Limits that keep one question from running away with time, tokens or memory.
     max_steps: int = 10
     max_rows: int = 100

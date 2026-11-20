@@ -48,12 +48,13 @@ def test_ask_returns_the_answer_and_the_queries_behind_it(client: TestClient):
         sql="SELECT count(*) FROM film",
         result=QueryResult(columns=["count"], rows=[[1000]]),
     )
-    use_analyst(Answer(answer="There are 1,000 films.", queries=[query]))
+    use_analyst(Answer(id="record-1", answer="There are 1,000 films.", queries=[query]))
 
     response = client.post("/ask", json={"question": "How many films are there?"})
 
     assert response.status_code == 200
     assert response.json() == {
+        "id": "record-1",
         "answer": "There are 1,000 films.",
         "queries": [
             {

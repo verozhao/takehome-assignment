@@ -5,10 +5,14 @@ repeats until Claude has enough to answer.
 """
 
 import asyncio
+import json
 import logging
-from collections.abc import AsyncIterator, Awaitable
-from datetime import date
-from typing import TypeVar
+import time
+import uuid
+from collections.abc import AsyncGenerator, Awaitable
+from contextlib import aclosing
+from datetime import UTC, date, datetime
+from typing import Literal, TypeVar
 
 from anthropic import AsyncAnthropic
 from anthropic.types import (
@@ -20,6 +24,7 @@ from anthropic.types import (
 )
 from pydantic import BaseModel
 
+from app import audit
 from app.config import Settings
 from app.database import Database, QueryResult
 
@@ -77,6 +82,8 @@ class ExecutedQuery(BaseModel):
 
 
 class Answer(BaseModel):
+    # The id of the stored record of this answer. Set when the answer is handed over.
+    id: str = ""
     answer: str
     queries: list[ExecutedQuery]
 
@@ -92,14 +99,69 @@ class Analyst:
 
     async def answer(self, question: str) -> Answer:
         """Work through the question and return the final answer."""
-        async for event in self.stream(question):
-            if isinstance(event, Answer):
-                return event
+        # Closing the stream on the way out writes its record before this returns.
+        async with aclosing(self.stream(question)) as events:
+            async for event in events:
+                if isinstance(event, Answer):
+                    return event
         # stream() always ends with an Answer or raises, so this line is never reached.
         raise AgentError("The loop ended without an answer.")
 
-    async def stream(self, question: str) -> AsyncIterator[ExecutedQuery | Answer]:
-        """Work through the question, yielding each query as it finishes and the answer last."""
+    async def stream(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
+        """Work through the question, yielding each query as it finishes and the answer last.
+
+        Every run leaves one record in the audit file, however it ends.
+        """
+        record_id = uuid.uuid4().hex
+        asked_at = datetime.now(UTC)
+        started = time.monotonic()
+        queries: list[audit.QueryRecord] = []
+        answer: str | None = None
+        # What the record says if the caller goes away before the run ends.
+        outcome: Literal["answered", "declined", "failed", "cancelled"] = "cancelled"
+        detail: str | None = None
+        try:
+            async for event in self.work(question):
+                if isinstance(event, Answer):
+                    event.id = record_id
+                    answer, outcome = event.answer, "answered"
+                else:
+                    queries.append(
+                        audit.QueryRecord(
+                            purpose=event.purpose,
+                            sql=event.sql,
+                            row_count=len(event.result.rows),
+                            truncated=event.result.truncated,
+                            error=event.result.error,
+                            rows_sha256=audit.sha256(json.dumps(event.result.rows)),
+                        )
+                    )
+                yield event
+        except QuestionDeclined as exc:
+            outcome, detail = "declined", str(exc)
+            raise
+        except Exception as exc:
+            outcome, detail = "failed", str(exc)
+            raise
+        finally:
+            audit.append(
+                self.settings.audit_log_path,
+                audit.AnswerRecord(
+                    id=record_id,
+                    asked_at=asked_at,
+                    seconds=round(time.monotonic() - started, 2),
+                    question=question,
+                    model=self.settings.anthropic_model,
+                    prompt_sha256=audit.sha256(self.system_prompt),
+                    queries=queries,
+                    outcome=outcome,
+                    detail=detail,
+                    answer=answer,
+                ),
+            )
+
+    async def work(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
+        """The loop itself: ask the model, run the queries it wants, repeat."""
         messages: list[MessageParam] = [{"role": "user", "content": question}]
         queries: list[ExecutedQuery] = []
         system: list[TextBlockParam] = [

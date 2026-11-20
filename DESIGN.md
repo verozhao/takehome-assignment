@@ -37,10 +37,11 @@ AI. In the order I would build it:
    the model provider, or the same model hosted in the firm's own cloud account. Column
    grants keep personal data out at the source. The role script shows it on one column, the
    staff password hashes, and the schema text lists only what the login may read.
-3. **A stored record of every answer.** Who asked, the question, the model and prompt
-   version, each SQL statement, a hash of each result, and the answer. Today that exists
-   only in the HTTP response. The log also holds SQL with literal values, so it needs the
-   same care as the data.
+3. **A stored record of every answer.** The service appends one line per question to a
+   file: the question, the model, a hash of the prompt, each SQL statement with a hash of
+   its result, the outcome and the answer. Production needs the caller in that record and
+   a store with retention rules in place of a file. The record and the log both hold SQL
+   with literal values, so both need the same care as the data.
 4. **Limits per user.** One question is bounded: ten steps, 120 seconds for all its model
    calls and queries together, and caps on rows and result size. Nothing bounds a user yet.
    Production needs rate and spend limits per caller and a cap on concurrent questions.

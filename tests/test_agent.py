@@ -1,7 +1,11 @@
 """The agent loop, driven by a scripted stand-in for Claude so no network is needed."""
 
 import asyncio
+import hashlib
+import json
+import os
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -65,6 +69,7 @@ def make_analyst(
     database: FakeDatabase,
     max_steps: int = 10,
     request_timeout_seconds: float = 120,
+    audit_log_path: str | Path = os.devnull,
 ) -> Analyst:
     settings = Settings(
         _env_file=None,
@@ -72,8 +77,13 @@ def make_analyst(
         database_url="postgresql://unused",
         max_steps=max_steps,
         request_timeout_seconds=request_timeout_seconds,
+        audit_log_path=str(audit_log_path),
     )
     return Analyst(client=claude, database=database, system_prompt="prompt", settings=settings)
+
+
+def records_in(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 async def test_runs_the_query_and_returns_the_answer_with_its_trace():
@@ -111,9 +121,83 @@ async def test_stream_yields_each_query_as_soon_as_it_finishes():
     assert first == query
     # The query is handed over before the model is asked again.
     assert len(claude.sent) == 1
-    assert [event async for event in stream] == [
-        Answer(answer="There are 1,000 films.", queries=[query])
+    [last] = [event async for event in stream]
+    assert isinstance(last, Answer)
+    assert last.answer == "There are 1,000 films."
+    assert last.queries == [query]
+
+
+async def test_every_answer_leaves_a_record(tmp_path: Path):
+    result = QueryResult(columns=["count"], rows=[[1000]])
+    claude = ScriptedClaude(
+        reply("tool_use", tool_use("SELECT count(*) FROM film")),
+        reply("end_turn", text("There are 1,000 films.")),
+    )
+    analyst = make_analyst(claude, FakeDatabase(result), audit_log_path=tmp_path / "audit.jsonl")
+
+    answer = await analyst.answer("How many films are there?")
+
+    [record] = records_in(tmp_path / "audit.jsonl")
+    # The caller gets the id of the record, so an answer can be traced back later.
+    assert record["id"] == answer.id
+    assert record["question"] == "How many films are there?"
+    assert record["outcome"] == "answered"
+    assert record["answer"] == "There are 1,000 films."
+    assert record["prompt_sha256"] == hashlib.sha256(b"prompt").hexdigest()
+    # The SQL is kept. The rows are not: only how many there were and a hash of them.
+    assert record["queries"] == [
+        {
+            "purpose": "test",
+            "sql": "SELECT count(*) FROM film",
+            "row_count": 1,
+            "truncated": False,
+            "error": None,
+            "rows_sha256": hashlib.sha256(b"[[1000]]").hexdigest(),
+        }
     ]
+
+
+async def test_a_run_without_an_answer_leaves_a_record_too(tmp_path: Path):
+    result = QueryResult(columns=["a"], rows=[[1]])
+    claude = ScriptedClaude(
+        reply("tool_use", tool_use("SELECT 1")),
+        reply("refusal"),
+    )
+    analyst = make_analyst(claude, FakeDatabase(result), audit_log_path=tmp_path / "audit.jsonl")
+
+    with pytest.raises(QuestionDeclined):
+        await analyst.answer("Anything")
+
+    [record] = records_in(tmp_path / "audit.jsonl")
+    assert record["outcome"] == "declined"
+    assert record["answer"] is None
+    assert len(record["queries"]) == 1
+
+
+async def test_a_failed_run_is_recorded_with_its_reason(tmp_path: Path):
+    claude = ScriptedClaude(reply("max_tokens", text("The answer is probably")))
+    analyst = make_analyst(claude, FakeDatabase(), audit_log_path=tmp_path / "audit.jsonl")
+
+    with pytest.raises(AgentError):
+        await analyst.answer("Anything")
+
+    [record] = records_in(tmp_path / "audit.jsonl")
+    assert record["outcome"] == "failed"
+    assert "max_tokens" in record["detail"]
+
+
+async def test_a_caller_who_leaves_early_is_recorded_as_cancelled(tmp_path: Path):
+    result = QueryResult(columns=["a"], rows=[[1]])
+    claude = ScriptedClaude(reply("tool_use", tool_use("SELECT 1")))
+    analyst = make_analyst(claude, FakeDatabase(result), audit_log_path=tmp_path / "audit.jsonl")
+    stream = analyst.stream("Anything")
+
+    await anext(stream)
+    await stream.aclose()
+
+    [record] = records_in(tmp_path / "audit.jsonl")
+    assert record["outcome"] == "cancelled"
+    assert len(record["queries"]) == 1
 
 
 async def test_the_model_is_told_todays_date():
