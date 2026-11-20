@@ -53,8 +53,8 @@ AI. In the order I would build it:
    The service now passes column comments and a glossary file to the model, and the model
    says when it used a definition. What it cannot supply is the definitions. Someone who
    owns the metric has to decide which of those two columns means active.
-7. **The user-facing work.** Streamed steps, which this branch adds. Then provenance for
-   each figure, conversation state, and an export for results larger than the row cap.
+7. **The user-facing work.** Streamed steps are in place. Next come provenance for each
+   figure, conversation state, and an export for results larger than the row cap.
 
 ## The components I left out
 
