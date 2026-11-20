@@ -50,8 +50,9 @@ AI. In the order I would build it:
 6. **Business meaning.** The schema says which columns exist and not what the business
    means by them. This database already shows it: `active = 1` matches 966 customers and
    `activebool` matches 987, so "how many active customers" has two defensible answers.
-   Production needs column comments, reviewed metric views and a short glossary, and each
-   answer should say whether it used a reviewed definition or SQL written on the spot.
+   The service now passes column comments and a glossary file to the model, and the model
+   says when it used a definition. What it cannot supply is the definitions. Someone who
+   owns the metric has to decide which of those two columns means active.
 7. **The user-facing work.** Streamed steps, which this branch adds. Then provenance for
    each figure, conversation state, and an export for results larger than the row cap.
 
