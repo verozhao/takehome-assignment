@@ -10,7 +10,6 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable
-from contextlib import aclosing
 from datetime import UTC, date, datetime
 from typing import Literal, TypeVar
 
@@ -99,32 +98,31 @@ class Analyst:
 
     async def answer(self, question: str) -> Answer:
         """Work through the question and return the final answer."""
-        # Closing the stream on the way out writes its record before this returns.
-        async with aclosing(self.stream(question)) as events:
-            async for event in events:
-                if isinstance(event, Answer):
-                    return event
+        async for event in self.stream(question):
+            if isinstance(event, Answer):
+                return event
         # stream() always ends with an Answer or raises, so this line is never reached.
         raise AgentError("The loop ended without an answer.")
 
     async def stream(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
         """Work through the question, yielding each query as it finishes and the answer last.
 
-        Every run leaves one record in the audit file, however it ends.
+        Every run leaves one record in the audit file, however it ends. The record of an
+        answer is written before the answer is handed over, so no answer exists without one.
         """
         record_id = uuid.uuid4().hex
         asked_at = datetime.now(UTC)
         started = time.monotonic()
         queries: list[audit.QueryRecord] = []
-        answer: str | None = None
+        answer: Answer | None = None
         # What the record says if the caller goes away before the run ends.
         outcome: Literal["answered", "declined", "failed", "cancelled"] = "cancelled"
         detail: str | None = None
         try:
             async for event in self.work(question):
                 if isinstance(event, Answer):
-                    event.id = record_id
-                    answer, outcome = event.answer, "answered"
+                    # Held back until its record is written, below.
+                    answer, outcome = event, "answered"
                 else:
                     queries.append(
                         audit.QueryRecord(
@@ -136,7 +134,7 @@ class Analyst:
                             rows_sha256=audit.sha256(json.dumps(event.result.rows)),
                         )
                     )
-                yield event
+                    yield event
         except QuestionDeclined as exc:
             outcome, detail = "declined", str(exc)
             raise
@@ -156,9 +154,12 @@ class Analyst:
                     queries=queries,
                     outcome=outcome,
                     detail=detail,
-                    answer=answer,
+                    answer=answer.answer if answer else None,
                 ),
             )
+        if answer:
+            answer.id = record_id
+            yield answer
 
     async def work(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
         """The loop itself: ask the model, run the queries it wants, repeat."""

@@ -157,6 +157,15 @@ async def test_every_answer_leaves_a_record(tmp_path: Path):
     ]
 
 
+async def test_no_answer_is_handed_over_when_its_record_cannot_be_written(tmp_path: Path):
+    claude = ScriptedClaude(reply("end_turn", text("There are 1,000 films.")))
+    unwritable = tmp_path / "no-such-folder" / "audit.jsonl"
+    stream = make_analyst(claude, FakeDatabase(), audit_log_path=unwritable).stream("How many?")
+
+    with pytest.raises(FileNotFoundError):
+        await anext(stream)
+
+
 async def test_a_run_without_an_answer_leaves_a_record_too(tmp_path: Path):
     result = QueryResult(columns=["a"], rows=[[1]])
     claude = ScriptedClaude(
