@@ -59,7 +59,8 @@ audited, and the code is small enough to read in one sitting.
 I am less happy with three things. The eval has only fifteen questions, and three of them have
 no reference answer, so I judged those by reading. A question takes 5 to 18 seconds. The
 streaming endpoint shows each query as it runs, but the answer still arrives in one piece.
-Follow-up questions do not work because requests are independent.
+Follow-up questions came last. They work, but each one runs its queries again and finds the
+earlier turns by scanning a file.
 
 ## 3. What would I do differently?
 
@@ -68,7 +69,8 @@ Follow-up questions do not work because requests are independent.
   most capable model.
 - Return the reading of the question as its own field, and trace each figure in the answer
   to its query in code. `DESIGN.md` explains why I prefer that to a confidence score.
-- Add conversation state for follow-up questions.
+- Design the stored record first. The audit trail, follow-up questions and the caller's
+  name all hang off it, and it arrived late as a file.
 
 ## 4. Where did I get stuck?
 

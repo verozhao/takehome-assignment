@@ -28,9 +28,12 @@ class AnswerRecord(BaseModel):
     id: str
     asked_at: datetime
     seconds: float
-    # Who asked, from the API key. None when the service runs without API keys.
-    caller: str | None
+    # Who asked, from the API key. None when the service runs without API keys, and in
+    # records written before login existed.
+    caller: str | None = None
     question: str
+    # The id of the answer this question followed up on, if any.
+    follow_up_to: str | None = None
     model: str
     reasoning_effort: str
     # Identifies the exact rules and schema text the model was given.
@@ -48,6 +51,31 @@ def sha256(text: str) -> str:
 def append(path: str, record: AnswerRecord) -> None:
     with open(open_for_append(path), "a", encoding="utf-8") as file:
         file.write(record.model_dump_json() + "\n")
+
+
+def find(path: str, record_id: str) -> AnswerRecord | None:
+    """Look one record up by its id. The file is scanned, which a real store would index."""
+    with open(path, encoding="utf-8") as file:
+        for line in file:
+            # A cheap test first, so that only a line naming the id is parsed.
+            if record_id in line:
+                record = AnswerRecord.model_validate_json(line)
+                if record.id == record_id:
+                    return record
+    return None
+
+
+def earlier_turns(path: str, record_id: str, limit: int) -> list[AnswerRecord]:
+    """The answer with this id and the answers it followed up on, oldest first."""
+    turns: list[AnswerRecord] = []
+    next_id: str | None = record_id
+    while next_id and len(turns) < limit:
+        record = find(path, next_id)
+        if record is None:
+            break
+        turns.append(record)
+        next_id = record.follow_up_to
+    return turns[::-1]
 
 
 def ensure_writable(path: str) -> None:

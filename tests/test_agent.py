@@ -13,6 +13,7 @@ import anthropic
 import httpx2
 import pytest
 
+from app import audit
 from app.agent import AgentError, Analyst, Answer, ExecutedQuery, QuestionDeclined
 from app.config import Settings
 from app.database import QueryResult
@@ -234,6 +235,86 @@ async def test_a_caller_who_leaves_early_is_recorded_as_cancelled(tmp_path: Path
     [record] = records_in(tmp_path / "audit.jsonl")
     assert record["outcome"] == "cancelled"
     assert len(record["queries"]) == 1
+
+
+async def test_a_follow_up_is_answered_with_the_earlier_turns_in_view(tmp_path: Path):
+    path = tmp_path / "audit.jsonl"
+    result = QueryResult(columns=["name"], rows=[["KARL SEAL"]])
+    claude = ScriptedClaude(
+        reply("tool_use", tool_use("SELECT name FROM top_payer")),
+        reply("end_turn", text("Karl Seal paid the most.")),
+        reply("end_turn", text("Mateo Scott paid the least.")),
+    )
+    analyst = make_analyst(claude, FakeDatabase(result), audit_log_path=path)
+    first = await analyst.answer("Who paid the most?")
+
+    earlier = audit.earlier_turns(str(path), first.id, limit=5)
+    second = await analyst.answer("What about least?", earlier=earlier)
+
+    # The model sees the first question again, the query it ran with a note where the rows
+    # were, its own answer word for word, and then the new question.
+    question, call, result, earlier_answer, follow_up = claude.sent[-1]
+    assert question == {"role": "user", "content": "Who paid the most?"}
+    assert call["content"][0]["input"]["sql"] == "SELECT name FROM top_payer"
+    assert result["content"][0]["tool_use_id"] == call["content"][0]["id"]
+    assert "KARL SEAL" not in json.dumps(result)
+    assert earlier_answer == {"role": "assistant", "content": "Karl Seal paid the most."}
+    assert follow_up == {"role": "user", "content": "What about least?"}
+    # The record of the follow-up points back, so the whole exchange can be walked.
+    chain = audit.earlier_turns(str(path), second.id, limit=5)
+    assert [turn.question for turn in chain] == ["Who paid the most?", "What about least?"]
+    assert [turn.question for turn in audit.earlier_turns(str(path), second.id, limit=1)] == [
+        "What about least?"
+    ]
+    assert audit.earlier_turns(str(path), "f" * 32, limit=5) == []
+
+
+async def test_a_longer_exchange_replays_every_earlier_turn_in_order(tmp_path: Path):
+    path = tmp_path / "audit.jsonl"
+    failed = QueryResult(columns=[], rows=[], error='column "nmae" does not exist')
+    rows = QueryResult(columns=["name"], rows=[["KARL SEAL"]])
+    claude = ScriptedClaude(
+        reply("tool_use", tool_use("SELECT nmae FROM top_payer")),
+        reply("tool_use", tool_use("SELECT name FROM top_payer")),
+        reply("end_turn", text("Karl Seal paid the most.")),
+        reply("tool_use", tool_use("SELECT name FROM bottom_payer")),
+        reply("end_turn", text("Mateo Scott paid the least.")),
+        reply("end_turn", text("He made one payment.")),
+    )
+    analyst = make_analyst(claude, FakeDatabase(failed, rows, rows), audit_log_path=path)
+    first = await analyst.answer("Who paid the most?")
+    second = await analyst.answer(
+        "What about least?", earlier=audit.earlier_turns(str(path), first.id, limit=5)
+    )
+
+    third = await analyst.answer(
+        "How many payments did he make?",
+        earlier=audit.earlier_turns(str(path), second.id, limit=5),
+    )
+
+    sent = claude.sent[-1]
+    assert [message["content"] for message in sent if isinstance(message["content"], str)] == [
+        "Who paid the most?",
+        "Karl Seal paid the most.",
+        "What about least?",
+        "Mateo Scott paid the least.",
+        "How many payments did he make?",
+    ]
+    # The query that failed is left out, and every replayed call has an id of its own.
+    calls = [
+        block
+        for message in sent
+        if message["role"] == "assistant" and not isinstance(message["content"], str)
+        for block in message["content"]
+    ]
+    assert [call["input"]["sql"] for call in calls] == [
+        "SELECT name FROM top_payer",
+        "SELECT name FROM bottom_payer",
+    ]
+    assert len({call["id"] for call in calls}) == 2
+    # Each record points at the answer just before it.
+    follow_up_to = {record["id"]: record["follow_up_to"] for record in records_in(path)}
+    assert follow_up_to == {first.id: None, second.id: first.id, third.id: second.id}
 
 
 async def test_the_model_is_told_todays_date():

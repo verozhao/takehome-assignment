@@ -2,7 +2,8 @@
 except in the last two tests, which start the real service against Pagila."""
 
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
+from datetime import datetime
 from pathlib import Path
 
 import anthropic
@@ -10,6 +11,7 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+from app import audit
 from app.agent import AgentError, Answer, ExecutedQuery, QuestionDeclined
 from app.database import QueryResult
 from app.main import app, get_analyst
@@ -19,22 +21,55 @@ class FakeAnalyst:
     def __init__(self, outcome: Answer | Exception) -> None:
         self.outcome = outcome
         self.callers: list[str | None] = []
+        self.earlier: list[str] = []
 
-    async def answer(self, question: str, caller: str | None = None) -> Answer:
+    async def answer(
+        self,
+        question: str,
+        caller: str | None = None,
+        earlier: Sequence[audit.AnswerRecord] = (),
+    ) -> Answer:
         self.callers.append(caller)
+        self.earlier = [turn.question for turn in earlier]
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
 
     async def stream(
-        self, question: str, caller: str | None = None
+        self,
+        question: str,
+        caller: str | None = None,
+        earlier: Sequence[audit.AnswerRecord] = (),
     ) -> AsyncIterator[ExecutedQuery | Answer]:
         self.callers.append(caller)
+        self.earlier = [turn.question for turn in earlier]
         if isinstance(self.outcome, Exception):
             raise self.outcome
         for query in self.outcome.queries:
             yield query
         yield self.outcome
+
+
+def stored_answer(
+    path: Path, record_id: str, question: str, follow_up_to: str | None = None, **changes: str
+) -> None:
+    """Put one answered question into an audit file, as an earlier run would have."""
+    fields = {
+        "id": record_id,
+        "asked_at": datetime.now().astimezone(),
+        "seconds": 1.0,
+        "caller": None,
+        "question": question,
+        "follow_up_to": follow_up_to,
+        "model": "claude-opus-5-5",
+        "reasoning_effort": "high",
+        "prompt_sha256": "0" * 64,
+        "queries": [],
+        "outcome": "answered",
+        "detail": None,
+        "answer": f"The answer to: {question}",
+    }
+    audit.append(str(path), audit.AnswerRecord(**{**fields, **changes}))
 
 
 @pytest.fixture
@@ -174,6 +209,76 @@ def test_a_valid_api_key_identifies_the_caller(client: TestClient):
 
     assert response.status_code == 200
     assert analyst.callers == ["bob"]
+
+
+FIRST, SECOND = "a" * 32, "b" * 32
+
+
+@pytest.mark.parametrize("endpoint", ["/ask", "/ask/stream"])
+def test_a_follow_up_gets_the_earlier_questions_oldest_first(
+    client: TestClient, tmp_path: Path, endpoint: str
+):
+    app.state.audit_log_path = str(tmp_path / "audit.jsonl")
+    stored_answer(tmp_path / "audit.jsonl", FIRST, "Who paid the most?")
+    stored_answer(tmp_path / "audit.jsonl", SECOND, "What about least?", follow_up_to=FIRST)
+    analyst = use_analyst(Answer(answer="88 payments.", queries=[]))
+
+    response = client.post(
+        endpoint, json={"question": "How many payments was that?", "follow_up_to": SECOND}
+    )
+
+    assert response.status_code == 200
+    assert analyst.earlier == ["Who paid the most?", "What about least?"]
+
+
+def test_an_answer_recorded_before_login_existed_can_be_followed_up(
+    client: TestClient, tmp_path: Path
+):
+    path = tmp_path / "audit.jsonl"
+    stored_answer(path, FIRST, "Who paid the most?")
+    record = json.loads(path.read_text())
+    del record["caller"]  # older records have no such field
+    path.write_text(json.dumps(record) + "\n")
+    app.state.audit_log_path = str(path)
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+
+    response = client.post("/ask", json={"question": "What about least?", "follow_up_to": FIRST})
+
+    assert response.status_code == 200
+    assert analyst.earlier == ["Who paid the most?"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "caller_key"),
+    [
+        ({}, None),  # no such answer: the id below is not in the file
+        ({"id": SECOND, "outcome": "failed"}, None),  # that run gave no answer
+        ({"id": SECOND, "caller": "alice"}, "key-for-bob"),  # another caller's answer
+    ],
+)
+def test_a_follow_up_to_an_answer_that_is_not_the_callers_is_not_found(
+    client: TestClient, tmp_path: Path, changes: dict[str, str], caller_key: str | None
+):
+    app.state.audit_log_path = str(tmp_path / "audit.jsonl")
+    app.state.api_keys = {"key-for-bob": "bob"} if caller_key else {}
+    stored_answer(tmp_path / "audit.jsonl", FIRST, "Who paid the most?", **changes)
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+    headers = {"Authorization": f"Bearer {caller_key}"} if caller_key else {}
+
+    response = client.post(
+        "/ask", json={"question": "What about least?", "follow_up_to": SECOND}, headers=headers
+    )
+
+    assert response.status_code == 404
+    assert analyst.callers == []
+
+
+def test_a_malformed_follow_up_id_is_rejected(client: TestClient):
+    use_analyst(Answer(answer="unused", queries=[]))
+
+    response = client.post("/ask", json={"question": "And then?", "follow_up_to": "../etc"})
+
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize("question", ["", "  \n "])
