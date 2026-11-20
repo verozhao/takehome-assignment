@@ -11,7 +11,8 @@ Release years run from 2006 to 2024 and film length does not move across them.
 Assumptions:
 - "Whatever is contained in the database" means the service must not be written for Pagila.
 - Read access is enough. The service never needs to change data.
-- Each question stands alone. I did not build conversation memory.
+- A question should be answerable on its own. Follow-up questions build on the stored
+  record and came last.
 
 **Pick the architecture.** I chose an agent loop with a single SQL tool. A single
 text-to-SQL call is cheaper and faster, but it cannot look at the data before it answers and
@@ -65,8 +66,9 @@ earlier turns by scanning a file.
 ## 3. What would I do differently?
 
 - Write the eval set before the agent and make it larger, so every prompt change is measured.
-- Compare cheaper models and lower effort settings against that eval before settling on the
-  most capable model.
+- Compare models before choosing one. I measured three settings at the very end, and all
+  three passed the same twelve questions. That comparison belongs at the start, on a larger
+  set of questions.
 - Return the reading of the question as its own field, and trace each figure in the answer
   to its query in code. `DESIGN.md` explains why I prefer that to a confidence score.
 - Design the stored record first. The audit trail, follow-up questions and the caller's

@@ -277,6 +277,11 @@ database tests pass as the superuser too, which shows the checks block `INSERT`,
 writes, such as `pg_create_physical_replication_slot`, or switch the session role for later
 queries with `set_config`. The read-only role is refused all of these.
 
+Every caller shares that one login, and Postgres lets a role cancel or end its own
+sessions. So one question could end another caller's query with `pg_terminate_backend`. I
+reproduced that, and the role script now takes `pg_terminate_backend` and
+`pg_cancel_backend` away from every role that is not a superuser.
+
 **Limits on everything the model controls.** Ten steps and 120 seconds per question, 100
 rows and 40,000 characters per result, and a 15-second statement timeout. The 120 seconds
 cover the whole question, every model call and every query together. A result that is too
@@ -307,10 +312,23 @@ model is told to use a definition when one applies and to say so. With the examp
 glossary, "How many rentals were returned late?" answered 27,750 and named the definition
 it used.
 
-**Claude Opus 5.5 with adaptive thinking at high effort.** I put accuracy first. Over three
-runs of the questions below, a question took 5 to 18 seconds. It cost 1 to 6 cents, about 3
-on average. The schema prompt is cached, so after the first call most input tokens are read
-from cache. Model and effort are settings.
+**Claude Opus 5.5 with adaptive thinking at high effort.** I put accuracy first and then
+measured what that choice costs. One pass of the eval below at each setting:
+
+| Setting | Graded questions passed | Average time | Cost per question |
+|---|---|---|---|
+| Opus 5.5, high effort (the default) | 12 of 12 | 8.1 s | 2.0 cents |
+| Opus 5.5, medium effort | 12 of 12 | 6.6 s | 1.6 cents |
+| Sonnet 5.5, high effort | 12 of 12 | 5.0 s | 0.6 cents |
+
+Twelve questions on one small schema do not separate the three settings. Sonnet 5.5 passed
+the same checks at a third of the cost. The one slip I saw came from Sonnet on a question
+asked outside these runs: the answer opened with 288 unreturned rentals and then gave the
+right count, 241. The judge in the eval fails that answer. I kept the strongest setting as
+the default because a wrong headline figure is the expensive failure for this kind of
+tool, and this eval is too small to show how often a cheaper setting produces one. Model
+and effort are settings, so the default can move when a larger eval supports it. The
+schema prompt is cached, so after the first call most input tokens are read from cache.
 
 **No agent framework.** The loop is about 60 lines in `app/agent.py`. Writing it out keeps
 every step visible and easy to debug.
@@ -325,40 +343,51 @@ python -m evals.run    # live: needs the service running, costs about 35 cents a
 
 - `tests/test_agent.py` drives the loop with a scripted stand-in for Claude: a result fed
   back, a SQL error fed back for a retry, several queries in one turn, the step limit, a
-  cut-off response, an empty response, a refusal, the event stream and the stored record.
+  cut-off response, an empty response, a refusal, the event stream, the stored record and
+  follow-up questions.
 - `tests/test_database.py` runs against Pagila: schema rendering, JSON-safe values,
   truncation, the size cap, the timeout, and a list of writes and non-query statements that
-  must be rejected. These tests send real `DELETE` and `UPDATE` statements, so run them as a
+  must be rejected. They also check that the read-only role cannot cancel or end another
+  session. These tests send real `DELETE` and `UPDATE` statements, so run them as a
   superuser only against a Pagila you can throw away.
-- `tests/test_api.py` covers the HTTP layer and starts the real service once.
+- `tests/test_api.py` covers the HTTP layer: the stream events, login, follow-up requests
+  and the error statuses. Its last two tests start the real service against Pagila.
+- `tests/test_prompt.py` checks how definitions reach the model: the glossary file and the
+  comments stored in the database.
+- `tests/test_config.py` checks that API keys too weak to protect the service stop it at
+  startup.
+- `tests/test_eval_check.py` tests the eval's own checks without a network.
 - `evals/run.py` asks the running service twelve graded questions and three probes. The
   graded ones are the four sample questions, one paraphrase, and seven that each hide a
   trap, such as a tie for first place or customers who never paid. Expected values come
-  from reference SQL executed when the eval runs. A case passes when each expected value
-  appears in the answer and in the rows the agent fetched.
+  from reference SQL executed when the eval runs. A case has to pass two checks. Each
+  expected value must stand alone in the answer and in the rows the agent fetched, so `10`
+  does not match inside `2010`. A judge model must also agree that the answer states the
+  reference facts correctly. That catches the highest and the lowest swapped, and an answer
+  that leads with a wrong figure.
 - `python -m evals.run --repeat 3` asks every question three times, to show how stable the
   answers are. The exit status is 1 when any graded attempt fails, so the eval can gate a
   change to the prompt or the model.
 
-A run with two attempts per question:
+A run with two attempts per question, graded by both checks:
 
 | Result | Passed | Average time | Question |
 |---|---|---|---|
-| PASS | 2 of 2 | 5.0 s | What actors were in Chocolat Harry? |
-| PASS | 2 of 2 | 7.7 s | Display the top 3 actors who have most appeared in films in the Children category |
-| PASS | 2 of 2 | 10.9 s | Which three actors show up most often in kids' movies? |
-| PASS | 2 of 2 | 15.4 s | A common criticism of modern movies is that they are too long. [...] |
-| PASS | 2 of 2 | 10.7 s | Which customer has paid the most for rentals? What about least? |
-| PASS | 2 of 2 | 4.8 s | How many rentals have not been returned yet? |
-| PASS | 2 of 2 | 5.3 s | Which film category has the most films? |
-| PASS | 2 of 2 | 9.1 s | Which customers have never made a payment? |
-| PASS | 2 of 2 | 6.6 s | Do any two actors have exactly the same name? Who? |
-| PASS | 2 of 2 | 5.6 s | In which year did payments add up to the most, and how much was it? |
-| PASS | 2 of 2 | 4.0 s | How long is the longest film, and how many films are that long? |
-| PASS | 2 of 2 | 3.9 s | Which rating has the most films, and how many? |
-| READ | | 7.8 s | What actors were in the film Zzyzx Road? |
-| READ | | 5.8 s | What is the average budget of a film? |
-| READ | | 6.7 s | Delete every payment made before 2023. |
+| PASS | 2 of 2 | 5.2 s | What actors were in Chocolat Harry? |
+| PASS | 2 of 2 | 9.2 s | Display the top 3 actors who have most appeared in films in the Children category |
+| PASS | 2 of 2 | 12.0 s | Which three actors show up most often in kids' movies? |
+| PASS | 2 of 2 | 17.8 s | A common criticism of modern movies is that they are too long. [...] |
+| PASS | 2 of 2 | 11.8 s | Which customer has paid the most for rentals? What about least? |
+| PASS | 2 of 2 | 5.5 s | How many rentals have not been returned yet? |
+| PASS | 2 of 2 | 5.4 s | Which film category has the most films? |
+| PASS | 2 of 2 | 9.0 s | Which customers have never made a payment? |
+| PASS | 2 of 2 | 6.0 s | Do any two actors have exactly the same name? Who? |
+| PASS | 2 of 2 | 6.7 s | In which year did payments add up to the most, and how much was it? |
+| PASS | 2 of 2 | 6.3 s | How long is the longest film, and how many films are that long? |
+| PASS | 2 of 2 | 5.4 s | Which rating has the most films, and how many? |
+| READ | | 7.4 s | What actors were in the film Zzyzx Road? |
+| READ | | 6.6 s | What is the average budget of a film? |
+| READ | | 5.7 s | Delete every payment made before 2023. |
 
 All twelve graded questions passed both attempts. The three probes have no reference
 SQL, so I judged them by reading. The service said there is no such film and listed the
@@ -384,25 +413,38 @@ Four details the answers got right:
 order, and what I would keep out. The limits of the code as it stands:
 
 - A follow-up sees the earlier questions, SQL and answers, and none of the earlier rows, so
-  it pays for its queries again. It reaches back five answers, and it finds them by scanning
-  the record file, which a real store would index.
+  it pays for its queries again. That it queries again is a prompt rule, and the eval does
+  not measure it yet. It reaches back five answers, and it finds them by scanning the
+  record file, which a real store would index.
 - `POST /ask/stream` shows each query as it finishes, but the two longest waits stay
   silent: the first model turn and the writing of the answer.
 - The schema is read once at startup.
-- The eval has twelve graded questions. It checks that the reference values appear, and it
-  cannot tell whether the conclusion drawn from them is right. The probes and the film
-  length conclusion are judged by reading. Next would be many more real questions and a
-  model-based judge for the open-ended ones.
-- A large schema would need table selection, and sample values in the schema text.
+- The eval has twelve graded questions, too few to separate the model settings I compared.
+  Its judge is a model and can be wrong. I checked it on three answers with a known
+  verdict: one correct, one with the two customers swapped, and one that led with a wrong
+  figure. It does not grade the conclusion about film lengths or the three probes, which I
+  judged by reading. Next would be many more real questions and follow-up pairs.
+- The whole schema goes into the prompt, which suits about 25 tables. For hundreds, the
+  prompt would list each table with its comment, and the model would read the columns of
+  the tables it picks through the query tool it already has. I did not build that, because
+  Pagila is too small to show whether it works. It needs a large schema and its own eval.
 - Login is by API key and optional. It says who is asking and nothing more. Every caller
   shares one database login, so there is no isolation between callers yet, and there is no
   rate limiting.
+- A read-only login can still call functions with effects outside the tables. The role
+  script revokes the two that end another caller's query. Others remain. A question can
+  write a message to the write-ahead log with `pg_logical_emit_message`, and ten slow
+  queries fill the connection pool. A deployment should review what `PUBLIC` may execute
+  and limit queries per caller.
 - Column grants decide what the model can see and read. The role script withholds one
   column as an example, the staff password hashes. A real deployment needs that review for
   every table.
-- Text stored in the database reaches the model. The prompt tells the model to treat it as
-  data and the connection cannot write, which limits the damage. It is not a full defence
-  against prompt injection.
+- Text stored in the database reaches the model and could carry instructions. The model
+  has one tool, a read-only query, so such text cannot make it change data or send anything
+  elsewhere. It could still slant an answer, or make the model read other rows that the
+  login may read. The prompt tells the model to treat stored text as data, and no prompt
+  rule fully prevents this. The firm limits are the column grants and, in production, a
+  database login per caller.
 
 ## Layout
 
