@@ -36,9 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.database = database
     app.state.schema = schema
     app.state.analyst = Analyst(
-        client=anthropic.AsyncAnthropic(
-            api_key=settings.anthropic_api_key, timeout=settings.model_timeout_seconds
-        ),
+        client=anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
         database=database,
         system_prompt=build_system_prompt(schema, settings),
         settings=settings,

@@ -4,6 +4,7 @@ The write tests send real DELETE and UPDATE statements and expect them to be ref
 Run them as a superuser only against a Pagila you can throw away.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -213,6 +214,16 @@ async def test_slow_queries_are_cancelled():
 
     assert "statement timeout" in result.error
     await database.close()
+
+
+async def test_a_query_cancelled_at_the_question_deadline_leaves_the_pool_usable(
+    database: Database,
+):
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await database.run_query("SELECT pg_sleep(5)")
+
+    assert (await database.run_query("SELECT 1 AS one")).rows == [[1]]
 
 
 async def test_a_query_cannot_switch_the_timeout_off_for_later_queries():

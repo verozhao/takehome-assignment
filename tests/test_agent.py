@@ -1,5 +1,6 @@
 """The agent loop, driven by a scripted stand-in for Claude so no network is needed."""
 
+import asyncio
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -39,28 +40,38 @@ class ScriptedClaude:
         self.responses = list(responses)
         self.sent: list[list] = []
         self.system: list[dict] = []
+        self.seconds_per_reply = 0.0
         self.messages = self  # so client.messages.create(...) lands on create() below
 
     async def create(self, **request: Any) -> SimpleNamespace:
         self.system = request["system"]
         self.sent.append(list(request["messages"]))
+        await asyncio.sleep(self.seconds_per_reply)
         return self.responses.pop(0)
 
 
 class FakeDatabase:
     def __init__(self, *results: QueryResult) -> None:
         self.results = list(results)
+        self.seconds_per_query = 0.0
 
     async def run_query(self, sql: str) -> QueryResult:
+        await asyncio.sleep(self.seconds_per_query)
         return self.results.pop(0)
 
 
-def make_analyst(claude: ScriptedClaude, database: FakeDatabase, max_steps: int = 10) -> Analyst:
+def make_analyst(
+    claude: ScriptedClaude,
+    database: FakeDatabase,
+    max_steps: int = 10,
+    request_timeout_seconds: float = 120,
+) -> Analyst:
     settings = Settings(
         _env_file=None,
         anthropic_api_key="unused",
         database_url="postgresql://unused",
         max_steps=max_steps,
+        request_timeout_seconds=request_timeout_seconds,
     )
     return Analyst(client=claude, database=database, system_prompt="prompt", settings=settings)
 
@@ -156,6 +167,32 @@ async def test_gives_up_when_the_step_limit_is_reached():
         await make_analyst(claude, FakeDatabase(result, result), max_steps=2).answer("Loop")
 
     assert len(claude.sent) == 2
+
+
+async def test_a_slow_model_is_stopped_at_the_time_limit_for_the_question():
+    claude = ScriptedClaude(reply("end_turn", text("Too late.")))
+    claude.seconds_per_reply = 5
+    analyst = make_analyst(claude, FakeDatabase(), request_timeout_seconds=0.05)
+
+    with pytest.raises(AgentError, match="time limit"):
+        await analyst.answer("Anything")
+
+
+async def test_slow_queries_count_towards_the_same_time_limit():
+    result = QueryResult(columns=["a"], rows=[[1]])
+    claude = ScriptedClaude(
+        reply("tool_use", tool_use("SELECT 1", "call_1"), tool_use("SELECT 2", "call_2")),
+        reply("end_turn", text("Too late.")),
+    )
+    database = FakeDatabase(result, result)
+    database.seconds_per_query = 0.04
+    analyst = make_analyst(claude, database, request_timeout_seconds=0.06)
+
+    # Each query alone fits in the limit. The two together do not.
+    with pytest.raises(AgentError, match="time limit"):
+        await analyst.answer("Anything")
+
+    assert len(claude.sent) == 1
 
 
 async def test_a_response_cut_off_by_the_token_limit_is_an_error_and_never_an_answer():

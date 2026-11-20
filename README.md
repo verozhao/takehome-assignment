@@ -193,10 +193,10 @@ database tests pass as the superuser too, which shows the checks block `INSERT`,
 writes, such as `pg_create_physical_replication_slot`, or switch the session role for later
 queries with `set_config`. The read-only role is refused all of these.
 
-**Limits on everything the model controls.** Ten steps per question, 100 rows and 40,000
-characters per result, a 15-second statement timeout and a 120-second timeout on each
-attempt at a model call. A result that is too large is refused with a message telling the model to aggregate
-or select fewer columns. Pagila needs this: its two JSONB package tables hold documents of
+**Limits on everything the model controls.** Ten steps and 120 seconds per question, 100
+rows and 40,000 characters per result, and a 15-second statement timeout. The 120 seconds
+cover the whole question, every model call and every query together. A result that is too
+large is refused with a message telling the model to aggregate or select fewer columns. Pagila needs this: its two JSONB package tables hold documents of
 about 700 characters each, so 100 rows of them would put 70,000 characters into the
 context. The size check runs after the rows are fetched, so the memory one query can use is
 bounded by the row cap and the timeout.
@@ -226,7 +226,7 @@ every step visible and easy to debug.
 ## Tests and evaluation
 
 ```bash
-pytest                 # 54 tests. Most of them need Pagila running.
+pytest                 # most of the tests need Pagila running
 mypy app evals         # type check
 python -m evals.run    # live: needs the service running, costs about 30 cents
 ```
