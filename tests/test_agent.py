@@ -48,7 +48,7 @@ class FakeDatabase:
 
 
 def make_analyst(claude: ScriptedClaude, database: FakeDatabase, max_steps: int = 10) -> Analyst:
-    settings = Settings(_env_file=None, max_steps=max_steps)
+    settings = Settings(_env_file=None, anthropic_api_key="unused", max_steps=max_steps)
     return Analyst(client=claude, database=database, system_prompt="prompt", settings=settings)
 
 

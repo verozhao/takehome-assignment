@@ -9,7 +9,8 @@ from app.database import Database
 
 
 async def connect(**overrides) -> Database:
-    return await Database.connect(Settings(**overrides))
+    # DATABASE_URL comes from the environment or .env. No API key is needed here.
+    return await Database.connect(Settings(anthropic_api_key="unused", **overrides))
 
 
 @pytest.fixture

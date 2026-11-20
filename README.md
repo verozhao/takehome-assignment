@@ -154,7 +154,7 @@ questions below this took 6 to 16 seconds and about 2 to 3 cents per question. T
 prompt is cached, so after the first call most input tokens are read from cache. Model and
 effort are settings.
 
-**No agent framework.** The loop is about 40 lines in `app/agent.py`. Writing it out keeps
+**No agent framework.** The loop is about 50 lines in `app/agent.py`. Writing it out keeps
 every step visible and easy to debug.
 
 ## Tests and evaluation
