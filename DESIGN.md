@@ -47,8 +47,9 @@ AI. In the order I would build it:
    calls and queries together, and caps on rows and result size. Nothing bounds a user yet.
    Production needs rate and spend limits per caller and a cap on concurrent questions.
 5. **An eval that gates every change.** Postgres catches invalid SQL. Nothing catches valid
-   SQL that answers a different question. A few hundred real questions with reference SQL
-   should run before any change of prompt, model or schema rendering.
+   SQL that answers a different question. The eval here grades twelve questions, can repeat
+   each one, and fails its run when any attempt fails. That is the mechanism. Production
+   needs a few hundred real questions behind it, run on every change of prompt or model.
 6. **Business meaning.** The schema says which columns exist and not what the business
    means by them. This database already shows it: `active = 1` matches 966 customers and
    `activebool` matches 987, so "how many active customers" has two defensible answers.

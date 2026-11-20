@@ -280,7 +280,7 @@ every step visible and easy to debug.
 ```bash
 pytest                 # most of the tests need Pagila running
 mypy app evals         # type check
-python -m evals.run    # live: needs the service running, costs about 30 cents
+python -m evals.run    # live: needs the service running, costs about 35 cents a pass
 ```
 
 - `tests/test_agent.py` drives the loop with a scripted stand-in for Claude: a result fed
@@ -291,30 +291,42 @@ python -m evals.run    # live: needs the service running, costs about 30 cents
   must be rejected. These tests send real `DELETE` and `UPDATE` statements, so run them as a
   superuser only against a Pagila you can throw away.
 - `tests/test_api.py` covers the HTTP layer and starts the real service once.
-- `evals/run.py` asks the running service the four sample questions, one paraphrase and
-  three probes. Expected values come from reference SQL executed when the eval runs. A case
-  passes when each expected value appears in the answer and in the rows the agent fetched.
+- `evals/run.py` asks the running service twelve graded questions and three probes. The
+  graded ones are the four sample questions, one paraphrase, and seven that each hide a
+  trap, such as a tie for first place or customers who never paid. Expected values come
+  from reference SQL executed when the eval runs. A case passes when each expected value
+  appears in the answer and in the rows the agent fetched.
+- `python -m evals.run --repeat 3` asks every question three times, to show how stable the
+  answers are. The exit status is 1 when any graded attempt fails, so the eval can gate a
+  change to the prompt or the model.
 
-A sample run:
+A run with two attempts per question:
 
-| Result | Time | Queries | Question |
+| Result | Passed | Average time | Question |
 |---|---|---|---|
-| PASS | 5.4 s | 1 | What actors were in Chocolat Harry? |
-| PASS | 9.3 s | 1 | Display the top 3 actors who have most appeared in films in the Children category |
-| PASS | 11.2 s | 2 | Which three actors show up most often in kids' movies? |
-| PASS | 17.8 s | 2 | A common criticism of modern movies is that they are too long. [...] |
-| PASS | 12.1 s | 2 | Which customer has paid the most for rentals? What about least? |
-| READ | 9.9 s | 2 | What actors were in the film Zzyzx Road? |
-| READ | 7.6 s | 1 | What is the average budget of a film? |
-| READ | 6.5 s | 1 | Delete every payment made before 2023. |
+| PASS | 2 of 2 | 5.0 s | What actors were in Chocolat Harry? |
+| PASS | 2 of 2 | 7.7 s | Display the top 3 actors who have most appeared in films in the Children category |
+| PASS | 2 of 2 | 10.9 s | Which three actors show up most often in kids' movies? |
+| PASS | 2 of 2 | 15.4 s | A common criticism of modern movies is that they are too long. [...] |
+| PASS | 2 of 2 | 10.7 s | Which customer has paid the most for rentals? What about least? |
+| PASS | 2 of 2 | 4.8 s | How many rentals have not been returned yet? |
+| PASS | 2 of 2 | 5.3 s | Which film category has the most films? |
+| PASS | 2 of 2 | 9.1 s | Which customers have never made a payment? |
+| PASS | 2 of 2 | 6.6 s | Do any two actors have exactly the same name? Who? |
+| PASS | 2 of 2 | 5.6 s | In which year did payments add up to the most, and how much was it? |
+| PASS | 2 of 2 | 4.0 s | How long is the longest film, and how many films are that long? |
+| PASS | 2 of 2 | 3.9 s | Which rating has the most films, and how many? |
+| READ | | 7.8 s | What actors were in the film Zzyzx Road? |
+| READ | | 5.8 s | What is the average budget of a film? |
+| READ | | 6.7 s | Delete every payment made before 2023. |
 
-All five graded questions passed in each of three runs. The three probes have no reference
+All twelve graded questions passed both attempts. The three probes have no reference
 SQL, so I judged them by reading. The service said there is no such film and listed the
 closest titles, said the database holds no budget data, and declined the delete because it
 can only read. For the film length question the check covers only the years and the average
 length, so I read its conclusion as well.
 
-Three details the answers got right:
+Four details the answers got right:
 
 - Top 3 Children actors: the top three are a clean three-way tie at 9 films, and nine more
   actors have 8. The answer reports the tie and that the next group has 8 films. It counts
@@ -324,6 +336,7 @@ Three details the answers got right:
   the data holds no older films to compare with.
 - Highest and lowest paying customer: two customers have no payments at all. The answer
   names the lowest-paying customer and also names the two who paid nothing.
+- Category with the most films: Drama and Music tie at 152 films. The answer names both.
 
 ## Limitations and next steps
 
