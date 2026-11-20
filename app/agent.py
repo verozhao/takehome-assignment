@@ -5,9 +5,16 @@ repeats until Claude has enough to answer.
 """
 
 import logging
+from datetime import date
 
 from anthropic import AsyncAnthropic
-from anthropic.types import Message, MessageParam, ToolParam, ToolResultBlockParam
+from anthropic.types import (
+    Message,
+    MessageParam,
+    TextBlockParam,
+    ToolParam,
+    ToolResultBlockParam,
+)
 from pydantic import BaseModel
 
 from app.config import Settings
@@ -41,6 +48,13 @@ RUN_SQL_TOOL: ToolParam = {
 }
 
 
+class RunSqlInput(BaseModel):
+    """What the model passes to run_sql. The SDK hands it over as an untyped dict."""
+
+    purpose: str
+    sql: str
+
+
 class AgentError(Exception):
     """The model stopped without producing an answer."""
 
@@ -65,7 +79,7 @@ class Answer(BaseModel):
 class Analyst:
     def __init__(
         self, client: AsyncAnthropic, database: Database, system_prompt: str, settings: Settings
-    ):
+    ) -> None:
         self.client = client
         self.database = database
         self.system_prompt = system_prompt
@@ -74,19 +88,19 @@ class Analyst:
     async def answer(self, question: str) -> Answer:
         messages: list[MessageParam] = [{"role": "user", "content": question}]
         queries: list[ExecutedQuery] = []
+        system: list[TextBlockParam] = [
+            # The schema makes this prompt long and it never changes, so cache it.
+            {"type": "text", "text": self.system_prompt, "cache_control": {"type": "ephemeral"}},
+            # The model does not know what day it is. The date sits outside the cached
+            # block, so the cache survives the date changing.
+            {"type": "text", "text": f"Today's date is {date.today().isoformat()}."},
+        ]
 
         for step in range(1, self.settings.max_steps + 1):
             response = await self.client.messages.create(
                 model=self.settings.anthropic_model,
                 max_tokens=MAX_TOKENS,
-                # The schema makes this prompt long and it never changes, so cache it.
-                system=[
-                    {
-                        "type": "text",
-                        "text": self.system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
+                system=system,
                 tools=[RUN_SQL_TOOL],
                 messages=messages,
                 thinking={"type": "adaptive"},
@@ -112,12 +126,12 @@ class Analyst:
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                sql = block.input["sql"]
-                result = await self.database.run_query(sql)
-                logger.info("run_sql: %s -> %s", sql, result.error or f"{len(result.rows)} rows")
-                queries.append(
-                    ExecutedQuery(purpose=block.input["purpose"], sql=sql, result=result)
+                call = RunSqlInput.model_validate(block.input)
+                result = await self.database.run_query(call.sql)
+                logger.info(
+                    "run_sql: %s -> %s", call.sql, result.error or f"{len(result.rows)} rows"
                 )
+                queries.append(ExecutedQuery(purpose=call.purpose, sql=call.sql, result=result))
                 tool_results.append(
                     {
                         "type": "tool_result",

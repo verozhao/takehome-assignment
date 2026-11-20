@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 import asyncpg
+from asyncpg.cursor import Cursor
+from asyncpg.prepared_stmt import PreparedStatement
 from pydantic import BaseModel
 
 from app.config import Settings
@@ -54,7 +56,7 @@ MAX_ERROR_CHARS = 2_000
 # What can go wrong with a statement the model wrote. Postgres rejects it, or the driver
 # cannot turn the result into Python values (a date past year 9999, a whole row as one
 # column), or the query closed its own connection.
-QUERY_ERRORS = (
+QUERY_ERRORS: tuple[type[Exception], ...] = (
     asyncpg.PostgresError,
     asyncpg.InterfaceError,
     asyncpg.InternalClientError,
@@ -77,14 +79,14 @@ class QueryResult(BaseModel):
 
 
 class Database:
-    def __init__(self, pool: asyncpg.Pool, max_rows: int, max_result_chars: int):
+    def __init__(self, pool: asyncpg.Pool, max_rows: int, max_result_chars: int) -> None:
         self.pool = pool
         self.max_rows = max_rows
         self.max_result_chars = max_result_chars
 
     @classmethod
     async def connect(cls, settings: Settings) -> "Database":
-        pool = await asyncpg.create_pool(
+        pool: asyncpg.Pool = await asyncpg.create_pool(
             settings.database_url,
             # A session default, so it is restored whenever a connection returns to the pool.
             server_settings={"statement_timeout": f"{settings.statement_timeout_ms}ms"},
@@ -98,9 +100,9 @@ class Database:
     async def describe_schema(self) -> str:
         """Render the schema as plain text, one block per table or view."""
         async with self.pool.acquire() as conn:
-            columns = await conn.fetch(COLUMNS_SQL)
-            keys = await conn.fetch(KEYS_SQL)
-            database_name = await conn.fetchval("SELECT current_database()")
+            columns: list[asyncpg.Record] = await conn.fetch(COLUMNS_SQL)
+            keys: list[asyncpg.Record] = await conn.fetch(KEYS_SQL)
+            database_name: str = await conn.fetchval("SELECT current_database()")
 
         if not columns:
             raise RuntimeError(
@@ -132,19 +134,21 @@ class Database:
                 async with conn.transaction(readonly=True):
                     # Postgres parses the statement here, so a syntax error or several
                     # statements in one string fail before anything runs.
-                    statement = await conn.prepare(sql)
-                    columns = [attribute.name for attribute in statement.get_attributes()]
+                    statement: PreparedStatement = await conn.prepare(sql)
+                    columns: list[str] = [
+                        attribute.name for attribute in statement.get_attributes()
+                    ]
                     refusal = reason_to_refuse(columns, statement.get_parameters())
                     if refusal:
                         return QueryResult(error=refusal)
-                    cursor = await statement.cursor()
+                    cursor: Cursor = await statement.cursor()
                     # One row more than the cap tells us whether the result was cut off.
-                    records = await cursor.fetch(self.max_rows + 1)
+                    records: list[asyncpg.Record] = await cursor.fetch(self.max_rows + 1)
             except QUERY_ERRORS as exc:
                 # Some messages quote the offending value, so an error can be as long as the data.
                 return QueryResult(error=str(exc)[:MAX_ERROR_CHARS])
 
-        rows = [list(record.values()) for record in records[: self.max_rows]]
+        rows: list[list[Any]] = [list(record.values()) for record in records[: self.max_rows]]
         # Decimal, date and other Postgres types are not JSON types. Serialising once,
         # with str() as the fallback, gives the model and the API caller the same values.
         encoded = json.dumps(rows, default=str)
@@ -162,7 +166,7 @@ class Database:
         )
 
 
-def reason_to_refuse(columns: list[str], parameters: tuple) -> str | None:
+def reason_to_refuse(columns: list[str], parameters: tuple[asyncpg.Type, ...]) -> str | None:
     """Statements that Postgres accepts but that are not plain queries."""
     if not columns:
         # SET, COPY, DO and similar commands return no columns.

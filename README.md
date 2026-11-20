@@ -181,7 +181,8 @@ question, the API returns 422. It never returns a partial answer.
 **A generic prompt.** The rules in the prompt are about analysing any database: check how
 values are stored before filtering, group by keys because names repeat, report ties, check
 what a time column covers before claiming a trend. A test fails if `pagila` or one of its
-main table names appears in the service code.
+main table names appears in the service code. Each request also tells the model today's
+date, which it cannot know and which questions about recent periods depend on.
 
 **Claude Opus 5.5 with adaptive thinking at high effort.** I put accuracy first. Over three
 runs of the questions below, a question took 5 to 18 seconds. It cost 1 to 6 cents, about 3
@@ -194,7 +195,8 @@ every step visible and easy to debug.
 ## Tests and evaluation
 
 ```bash
-pytest                 # 49 tests. Most of them need Pagila running.
+pytest                 # 50 tests. Most of them need Pagila running.
+mypy app evals         # type check
 python -m evals.run    # live: needs the service running, costs about 30 cents
 ```
 
