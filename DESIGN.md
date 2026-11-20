@@ -35,7 +35,8 @@ AI. In the order I would build it:
 2. **A route for the data that leaves.** Every step sends the schema and up to 40,000
    characters of rows to an outside API. Client data needs retention and region terms with
    the model provider, or the same model hosted in the firm's own cloud account. Column
-   grants keep personal data out at the source.
+   grants keep personal data out at the source. The role script shows it on one column, the
+   staff password hashes, and the schema text lists only what the login may read.
 3. **A stored record of every answer.** Who asked, the question, the model and prompt
    version, each SQL statement, a hash of each result, and the answer. Today that exists
    only in the HTTP response. The log also holds SQL with literal values, so it needs the
