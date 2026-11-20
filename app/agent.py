@@ -4,9 +4,11 @@ Claude decides which SQL to run, we run it and hand back the result, and this
 repeats until Claude has enough to answer.
 """
 
+import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from datetime import date
+from typing import TypeVar
 
 from anthropic import AsyncAnthropic
 from anthropic.types import (
@@ -22,6 +24,8 @@ from app.config import Settings
 from app.database import Database, QueryResult
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 MAX_TOKENS = 16_000
 
@@ -106,17 +110,23 @@ class Analyst:
             {"type": "text", "text": f"Today's date is {date.today().isoformat()}."},
         ]
 
+        # One deadline for the whole question, on the event loop's clock.
+        deadline = asyncio.get_running_loop().time() + self.settings.request_timeout_seconds
+
         for step in range(1, self.settings.max_steps + 1):
-            response = await self.client.messages.create(
-                model=self.settings.anthropic_model,
-                max_tokens=MAX_TOKENS,
-                system=system,
-                tools=[RUN_SQL_TOOL],
-                messages=messages,
-                thinking={"type": "adaptive"},
-                output_config={"effort": self.settings.reasoning_effort},
-                # Also cache the conversation so far, which is resent on every step.
-                cache_control={"type": "ephemeral"},
+            response = await before(
+                deadline,
+                self.client.messages.create(
+                    model=self.settings.anthropic_model,
+                    max_tokens=MAX_TOKENS,
+                    system=system,
+                    tools=[RUN_SQL_TOOL],
+                    messages=messages,
+                    thinking={"type": "adaptive"},
+                    output_config={"effort": self.settings.reasoning_effort},
+                    # Also cache the conversation so far, which is resent on every step.
+                    cache_control={"type": "ephemeral"},
+                ),
             )
             log_step(step, response)
 
@@ -138,7 +148,7 @@ class Analyst:
                 if block.type != "tool_use":
                     continue
                 call = RunSqlInput.model_validate(block.input)
-                result = await self.database.run_query(call.sql)
+                result = await before(deadline, self.database.run_query(call.sql))
                 logger.info(
                     "run_sql: %s -> %s", call.sql, result.error or f"{len(result.rows)} rows"
                 )
@@ -157,6 +167,15 @@ class Analyst:
             messages.append({"role": "user", "content": tool_results})
 
         raise AgentError(f"No answer after {self.settings.max_steps} steps.")
+
+
+async def before(deadline: float, work: Awaitable[T]) -> T:
+    """Wait for `work`, but never past the deadline for the whole question."""
+    try:
+        async with asyncio.timeout_at(deadline):
+            return await work
+    except TimeoutError:
+        raise AgentError("The time limit for one question was reached.") from None
 
 
 def log_step(step: int, response: Message) -> None:

@@ -40,9 +40,9 @@ AI. In the order I would build it:
    version, each SQL statement, a hash of each result, and the answer. Today that exists
    only in the HTTP response. The log also holds SQL with literal values, so it needs the
    same care as the data.
-4. **A bound on the whole request.** Every limit today is per step. The worst case is ten
-   steps of three attempts of 120 seconds each. Production needs one deadline for the
-   question, a cap on queries per question, and rate and spend limits per user.
+4. **Limits per user.** One question is bounded: ten steps, 120 seconds for all its model
+   calls and queries together, and caps on rows and result size. Nothing bounds a user yet.
+   Production needs rate and spend limits per caller and a cap on concurrent questions.
 5. **An eval that gates every change.** Postgres catches invalid SQL. Nothing catches valid
    SQL that answers a different question. A few hundred real questions with reference SQL
    should run before any change of prompt, model or schema rendering.
