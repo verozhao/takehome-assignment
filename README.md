@@ -343,16 +343,20 @@ Four details the answers got right:
 [DESIGN.md](DESIGN.md) covers the path from here to production: what I would add, in which
 order, and what I would keep out. The limits of the code as it stands:
 
-- Each request stands alone. Follow-up questions would need conversation state.
+- Each request stands alone, so follow-up questions do not work. The stored record gives
+  every answer an id, which is the natural hook: a follow-up would name the answer it
+  continues.
 - `POST /ask/stream` shows each query as it finishes, but the two longest waits stay
   silent: the first model turn and the writing of the answer.
 - The schema is read once at startup.
-- The eval is small, and the probes and the film length conclusion are judged by reading.
-  With more time I would add more questions, a model-based judge for the open-ended ones,
-  and repeat runs to measure consistency.
-- A large schema would need table selection before the main loop, plus column comments and
-  sample values in the schema text.
-- The API has no authentication or rate limiting.
+- The eval has twelve graded questions. It checks that the reference values appear, and it
+  cannot tell whether the conclusion drawn from them is right. The probes and the film
+  length conclusion are judged by reading. Next would be many more real questions and a
+  model-based judge for the open-ended ones.
+- A large schema would need table selection, and sample values in the schema text.
+- The service has no login and no rate limiting. Anyone who can reach the port can ask, and
+  the record of an answer does not say who asked. The database login is read-only and sees
+  only granted columns, but every caller shares it.
 - Column grants decide what the model can see and read. The role script withholds one
   column as an example, the staff password hashes. A real deployment needs that review for
   every table.
