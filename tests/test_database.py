@@ -186,6 +186,24 @@ async def test_statements_that_are_not_a_single_plain_query_are_rejected(
     assert result.error is not None
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Postgres accepts these, but the driver cannot turn the result into Python values.
+        "SELECT TIME '24:00:00'",
+        "SELECT DATE '10000-01-01'",
+        "SELECT f FROM film f LIMIT 1",
+        # This one ends its own connection.
+        "SELECT pg_terminate_backend(pg_backend_pid())",
+    ],
+)
+async def test_driver_errors_come_back_as_errors(database: Database, sql: str):
+    result = await database.run_query(sql)
+
+    assert result.error is not None
+    assert (await database.run_query("SELECT 1 AS one")).rows == [[1]]
+
+
 async def test_slow_queries_are_cancelled():
     database = await connect(statement_timeout_ms=200)
 

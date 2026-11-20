@@ -129,7 +129,7 @@ async def main() -> None:
     await database.close()
 
     questions = [question for question, _ in GRADED + PROBES]
-    async with httpx.AsyncClient(base_url=API_URL, timeout=300) as api:
+    async with httpx.AsyncClient(base_url=API_URL, timeout=600) as api:
         results = await asyncio.gather(*(ask(api, question) for question in questions))
 
     failed = 0

@@ -150,18 +150,21 @@ is rejected. Anything that returns no columns (`SET`, `COPY`, `DO`) is refused, 
 placeholders. Writes fail because the transaction is read-only. `EXPLAIN` is refused as
 well, because `EXPLAIN ANALYZE` can create a table even inside a read-only transaction. My
 first plan was a SQL parsing library. I dropped it because it would reject valid Postgres
-syntax it does not know and would catch nothing the database does not already catch.
+syntax it does not know. The one gap it would have closed is `EXPLAIN ANALYZE`, and a single
+check on the result columns closes that.
 
 **The read-only role is the real security boundary.** No statement check can stop a
 superuser from calling a function such as `pg_read_file` inside a `SELECT`. So the
 repository ships a role that can read the tables in the `public` schema and nothing else,
 and the service is meant to connect with it. The application checks are a second layer. The
-database tests pass as the superuser too, which shows the checks block writes on their own,
-but a superuser can still call functions with side effects outside the transaction.
+database tests pass as the superuser too, which shows the checks block `INSERT`, `UPDATE`,
+`DELETE` and DDL statements on their own. A superuser can still call a function that
+writes, such as `pg_create_physical_replication_slot`, or switch the session role for later
+queries with `set_config`. The read-only role is refused all of these.
 
 **Limits on everything the model controls.** Ten steps per question, 100 rows and 40,000
-characters per result, a 15-second statement timeout and a 120-second timeout per model
-call. A result that is too large is refused with a message telling the model to aggregate
+characters per result, a 15-second statement timeout and a 120-second timeout on each
+attempt at a model call. A result that is too large is refused with a message telling the model to aggregate
 or select fewer columns. Pagila needs this: its two JSONB package tables hold documents of
 about 700 characters each, so 100 rows of them would put 70,000 characters into the
 context. The size check runs after the rows are fetched, so the memory one query can use is
@@ -181,9 +184,9 @@ what a time column covers before claiming a trend. A test fails if `pagila` or o
 main table names appears in the service code.
 
 **Claude Opus 5.5 with adaptive thinking at high effort.** I put accuracy first. Over three
-runs of the questions below, a question took 5 to 18 seconds and cost about 2 to 4 cents.
-The schema prompt is cached, so after the first call most input tokens are read from cache.
-Model and effort are settings.
+runs of the questions below, a question took 5 to 18 seconds. It cost 1 to 6 cents, about 3
+on average. The schema prompt is cached, so after the first call most input tokens are read
+from cache. Model and effort are settings.
 
 **No agent framework.** The loop is about 50 lines in `app/agent.py`. Writing it out keeps
 every step visible and easy to debug.
@@ -191,7 +194,7 @@ every step visible and easy to debug.
 ## Tests and evaluation
 
 ```bash
-pytest                 # 45 tests. Most of them need Pagila running.
+pytest                 # 49 tests. Most of them need Pagila running.
 python -m evals.run    # live: needs the service running, costs about 30 cents
 ```
 

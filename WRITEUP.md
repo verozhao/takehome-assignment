@@ -25,7 +25,8 @@ and views. It would not scale to hundreds without a table selection step.
 **Make database access safe.** The service connects as a read-only role, runs each query in
 a read-only transaction, lets Postgres itself validate the statement, and caps steps, rows,
 result size and time. My first plan used a SQL parsing library. I dropped it because the
-database already enforces everything it would have checked.
+database already enforces almost everything it would have checked. The review later found
+the exception, `EXPLAIN ANALYZE`, which needed one extra check.
 
 **Design the response.** The API returns the answer with every query, its purpose and its
 rows, so a reader can check any number. If the model cannot finish, the API returns an
@@ -39,7 +40,7 @@ the sample questions and compares the answers with reference SQL.
 critique the design from several angles, to draft code that I then read and tested, and to
 run an adversarial review of the finished code. I checked each review finding before acting
 on it. The review found real problems. The most serious was that `EXPLAIN ANALYZE` can
-create a table inside a read-only transaction.
+create a table inside a read-only transaction, which the service now refuses.
 
 ## 2. Am I happy with the solution?
 
@@ -74,7 +75,8 @@ person will hit the same thing.
 trusting the database. What settled it was a list of writes and non-query statements, run
 once as the read-only role and once as the superuser. Preparing each statement, refusing
 any that returns no columns, and running the rest in a read-only transaction rejected all
-of them, with less code than a parser.
+of them, with less code than a parser. The review later added `EXPLAIN` and placeholders to
+that list, and each needed one more check.
 
 **A wrong assumption about the data.** From the classic version of this dataset I expected
 every film to carry the same release year, which would have made the film length question

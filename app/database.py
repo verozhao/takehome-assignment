@@ -51,6 +51,17 @@ ORDER BY relation, con.contype DESC, definition
 
 MAX_ERROR_CHARS = 2_000
 
+# What can go wrong with a statement the model wrote. Postgres rejects it, or the driver
+# cannot turn the result into Python values (a date past year 9999, a whole row as one
+# column), or the query closed its own connection.
+QUERY_ERRORS = (
+    asyncpg.PostgresError,
+    asyncpg.InterfaceError,
+    asyncpg.InternalClientError,
+    ValueError,
+    ArithmeticError,
+)
+
 
 class QueryResult(BaseModel):
     columns: list[str] = []
@@ -129,7 +140,7 @@ class Database:
                     cursor = await statement.cursor()
                     # One row more than the cap tells us whether the result was cut off.
                     records = await cursor.fetch(self.max_rows + 1)
-            except asyncpg.PostgresError as exc:
+            except QUERY_ERRORS as exc:
                 # Some messages quote the offending value, so an error can be as long as the data.
                 return QueryResult(error=str(exc)[:MAX_ERROR_CHARS])
 

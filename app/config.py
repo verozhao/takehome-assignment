@@ -22,4 +22,5 @@ class Settings(BaseSettings):
     max_rows: int = 100
     max_result_chars: int = 40_000
     statement_timeout_ms: int = 15_000
+    # Per attempt. The SDK retries a failed call twice.
     model_timeout_seconds: float = 120
