@@ -28,8 +28,9 @@ class AnswerRecord(BaseModel):
     id: str
     asked_at: datetime
     seconds: float
-    # Who asked, from the API key. None when the service runs without API keys.
-    caller: str | None
+    # Who asked, from the API key. None when the service runs without API keys, and in
+    # records written before login existed.
+    caller: str | None = None
     question: str
     # The id of the answer this question followed up on, if any.
     follow_up_to: str | None = None

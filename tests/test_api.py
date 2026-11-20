@@ -214,18 +214,38 @@ def test_a_valid_api_key_identifies_the_caller(client: TestClient):
 FIRST, SECOND = "a" * 32, "b" * 32
 
 
-def test_a_follow_up_gets_the_earlier_questions_oldest_first(client: TestClient, tmp_path: Path):
+@pytest.mark.parametrize("endpoint", ["/ask", "/ask/stream"])
+def test_a_follow_up_gets_the_earlier_questions_oldest_first(
+    client: TestClient, tmp_path: Path, endpoint: str
+):
     app.state.audit_log_path = str(tmp_path / "audit.jsonl")
     stored_answer(tmp_path / "audit.jsonl", FIRST, "Who paid the most?")
     stored_answer(tmp_path / "audit.jsonl", SECOND, "What about least?", follow_up_to=FIRST)
     analyst = use_analyst(Answer(answer="88 payments.", queries=[]))
 
     response = client.post(
-        "/ask", json={"question": "How many payments was that?", "follow_up_to": SECOND}
+        endpoint, json={"question": "How many payments was that?", "follow_up_to": SECOND}
     )
 
     assert response.status_code == 200
     assert analyst.earlier == ["Who paid the most?", "What about least?"]
+
+
+def test_an_answer_recorded_before_login_existed_can_be_followed_up(
+    client: TestClient, tmp_path: Path
+):
+    path = tmp_path / "audit.jsonl"
+    stored_answer(path, FIRST, "Who paid the most?")
+    record = json.loads(path.read_text())
+    del record["caller"]  # older records have no such field
+    path.write_text(json.dumps(record) + "\n")
+    app.state.audit_log_path = str(path)
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+
+    response = client.post("/ask", json={"question": "What about least?", "follow_up_to": FIRST})
+
+    assert response.status_code == 200
+    assert analyst.earlier == ["Who paid the most?"]
 
 
 @pytest.mark.parametrize(
