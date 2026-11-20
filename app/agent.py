@@ -5,10 +5,13 @@ repeats until Claude has enough to answer.
 """
 
 import asyncio
+import json
 import logging
-from collections.abc import AsyncIterator, Awaitable
-from datetime import date
-from typing import TypeVar
+import time
+import uuid
+from collections.abc import AsyncGenerator, Awaitable
+from datetime import date, datetime
+from typing import Literal, TypeVar
 
 from anthropic import AsyncAnthropic
 from anthropic.types import (
@@ -20,6 +23,7 @@ from anthropic.types import (
 )
 from pydantic import BaseModel
 
+from app import audit
 from app.config import Settings
 from app.database import Database, QueryResult
 
@@ -77,6 +81,8 @@ class ExecutedQuery(BaseModel):
 
 
 class Answer(BaseModel):
+    # The id of the stored record of this answer. Set when the answer is handed over.
+    id: str = ""
     answer: str
     queries: list[ExecutedQuery]
 
@@ -98,8 +104,67 @@ class Analyst:
         # stream() always ends with an Answer or raises, so this line is never reached.
         raise AgentError("The loop ended without an answer.")
 
-    async def stream(self, question: str) -> AsyncIterator[ExecutedQuery | Answer]:
-        """Work through the question, yielding each query as it finishes and the answer last."""
+    async def stream(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
+        """Work through the question, yielding each query as it finishes and the answer last.
+
+        Every run leaves one record in the audit file, however it ends. The record of an
+        answer is written before the answer is handed over, so no answer exists without one.
+        """
+        record_id = uuid.uuid4().hex
+        # Local time with its offset, so the record shows the date the model was told.
+        asked_at = datetime.now().astimezone()
+        started = time.monotonic()
+        queries: list[audit.QueryRecord] = []
+        answer: Answer | None = None
+        # What the record says if the caller goes away before the run ends.
+        outcome: Literal["answered", "declined", "failed", "cancelled"] = "cancelled"
+        detail: str | None = None
+        try:
+            async for event in self.work(question):
+                if isinstance(event, Answer):
+                    # Held back until its record is written, below.
+                    answer, outcome = event, "answered"
+                else:
+                    queries.append(
+                        audit.QueryRecord(
+                            purpose=event.purpose,
+                            sql=event.sql,
+                            row_count=len(event.result.rows),
+                            truncated=event.result.truncated,
+                            error=event.result.error,
+                            rows_sha256=audit.sha256(json.dumps(event.result.rows)),
+                        )
+                    )
+                    yield event
+        except QuestionDeclined as exc:
+            outcome, detail = "declined", str(exc)
+            raise
+        except Exception as exc:
+            outcome, detail = "failed", str(exc)
+            raise
+        finally:
+            audit.append(
+                self.settings.audit_log_path,
+                audit.AnswerRecord(
+                    id=record_id,
+                    asked_at=asked_at,
+                    seconds=round(time.monotonic() - started, 2),
+                    question=question,
+                    model=self.settings.anthropic_model,
+                    reasoning_effort=self.settings.reasoning_effort,
+                    prompt_sha256=audit.sha256(self.system_prompt),
+                    queries=queries,
+                    outcome=outcome,
+                    detail=detail,
+                    answer=answer.answer if answer else None,
+                ),
+            )
+        if answer:
+            answer.id = record_id
+            yield answer
+
+    async def work(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
+        """The loop itself: ask the model, run the queries it wants, repeat."""
         messages: list[MessageParam] = [{"role": "user", "content": question}]
         queries: list[ExecutedQuery] = []
         system: list[TextBlockParam] = [

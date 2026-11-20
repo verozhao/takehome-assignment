@@ -4,8 +4,8 @@ step by step, so a client can show the work while it waits."""
 
 import json
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing, asynccontextmanager
 from typing import Annotated
 
 import anthropic
@@ -76,22 +76,26 @@ async def ask_stream(
     return StreamingResponse(events, media_type="text/event-stream")
 
 
-async def server_sent_events(stream: AsyncIterator[ExecutedQuery | Answer]) -> AsyncIterator[str]:
+async def server_sent_events(
+    stream: AsyncGenerator[ExecutedQuery | Answer, None],
+) -> AsyncIterator[str]:
     # Sent at once, so the client knows the question arrived before the first model turn ends.
     yield sse("started", "{}")
-    try:
-        async for event in stream:
-            name = "answer" if isinstance(event, Answer) else "query"
-            yield sse(name, event.model_dump_json())
-    # The response has already started with status 200. A failure travels as an event
-    # that carries the status the plain endpoint would have returned.
-    except QuestionDeclined as exc:
-        yield sse("error", json.dumps({"status": 422, "detail": str(exc)}))
-    except AgentError as exc:
-        yield sse("error", json.dumps({"status": 502, "detail": str(exc)}))
-    except anthropic.APIError as exc:
-        logger.error("Claude API call failed: %s", exc)
-        yield sse("error", json.dumps({"status": 502, "detail": CLAUDE_FAILURE}))
+    # Closing the stream when the client leaves lets it record how the run ended.
+    async with aclosing(stream) as events:
+        try:
+            async for event in events:
+                name = "answer" if isinstance(event, Answer) else "query"
+                yield sse(name, event.model_dump_json())
+        # The response has already started with status 200. A failure travels as an event
+        # that carries the status the plain endpoint would have returned.
+        except QuestionDeclined as exc:
+            yield sse("error", json.dumps({"status": 422, "detail": str(exc)}))
+        except AgentError as exc:
+            yield sse("error", json.dumps({"status": 502, "detail": str(exc)}))
+        except anthropic.APIError as exc:
+            logger.error("Claude API call failed: %s", exc)
+            yield sse("error", json.dumps({"status": 502, "detail": CLAUDE_FAILURE}))
 
 
 def sse(event: str, data: str) -> str:
