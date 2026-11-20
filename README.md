@@ -174,7 +174,10 @@ it.
 The record keeps the SQL and a hash of each result. It does not keep the rows. The prompt
 hash identifies the exact rules and schema text the model was given. The outcome is
 `answered`, `declined`, `failed` or `cancelled`. A caller who disconnects in the middle of
-a stream is recorded as cancelled, with the queries that had run by then.
+a stream is recorded as cancelled, with the queries that had run by then. Plain `POST /ask`
+does not notice a caller who leaves, so that run finishes and is recorded as `answered`.
+`answered` means the run produced an answer. It does not mean the caller received it. The
+service refuses to start when it cannot write this file.
 
 The SQL, the error text of a failed query and the answer can all contain names and values,
 so this file needs the same care as the data. A new file is readable by the service's own

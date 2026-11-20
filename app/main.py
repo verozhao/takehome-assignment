@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app import audit
 from app.agent import AgentError, Analyst, Answer, ExecutedQuery, QuestionDeclined
 from app.config import Settings
 from app.database import Database
@@ -30,6 +31,7 @@ CLAUDE_FAILURE = "The request to the language model failed. See the service log.
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()
+    audit.ensure_writable(settings.audit_log_path)
     database = await Database.connect(settings)
     # The schema is read once. Restart the service after a schema change.
     schema = await database.describe_schema()

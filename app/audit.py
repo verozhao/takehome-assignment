@@ -44,7 +44,15 @@ def sha256(text: str) -> str:
 
 
 def append(path: str, record: AnswerRecord) -> None:
-    # A new file is readable by the service's own user only, because records can hold data.
-    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    with open(descriptor, "a", encoding="utf-8") as file:
+    with open(open_for_append(path), "a", encoding="utf-8") as file:
         file.write(record.model_dump_json() + "\n")
+
+
+def ensure_writable(path: str) -> None:
+    """Fail at startup if the record file cannot be written, and not after a question ran."""
+    os.close(open_for_append(path))
+
+
+def open_for_append(path: str) -> int:
+    # A new file is readable by the service's own user only, because records can hold data.
+    return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
