@@ -36,6 +36,13 @@ error. It never returns a partial answer.
 run against Pagila, including a list of statements that must be rejected. A live eval asks
 the sample questions and compares the answers with reference SQL.
 
+**Close the gaps that have a small fix.** After the first version worked, I listed what
+would block it in production and fixed the items with a small, testable fix, each as its own
+pull request: one deadline for a whole question, column grants that decide what the model
+sees, a stored record of every answer, definitions from the database and a glossary, and a
+larger eval with repeat runs. The items that need something this sample database does not
+have, such as tenants, I wrote up in `DESIGN.md` and left as design.
+
 **Tools.** I used an AI coding assistant throughout, as the FAQ allows. I used it to
 critique the design from several angles, to draft code that I then read and tested, and to
 run an adversarial review of the finished code. I checked each review finding before acting

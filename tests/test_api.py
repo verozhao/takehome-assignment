@@ -3,6 +3,7 @@ except in the last test, which starts the real service against Pagila."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import anthropic
 import httpx2
@@ -148,8 +149,21 @@ def test_a_claude_api_failure_is_bad_gateway_without_upstream_details(client: Te
     assert "secret upstream detail" not in response.text
 
 
-def test_the_service_starts_and_gives_the_model_the_schema(monkeypatch: pytest.MonkeyPatch):
+def test_the_service_refuses_to_start_when_it_cannot_keep_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "no-such-folder" / "audit.jsonl"))
+
+    with pytest.raises(FileNotFoundError), TestClient(app):
+        pass
+
+
+def test_the_service_starts_and_gives_the_model_the_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")  # startup makes no call to Claude
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
 
     with TestClient(app) as started:
         assert started.get("/health").json() == {"status": "ok"}
