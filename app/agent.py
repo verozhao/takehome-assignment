@@ -5,9 +5,16 @@ repeats until Claude has enough to answer.
 """
 
 import logging
+from datetime import date
 
 from anthropic import AsyncAnthropic
-from anthropic.types import Message, MessageParam, ToolParam, ToolResultBlockParam
+from anthropic.types import (
+    Message,
+    MessageParam,
+    TextBlockParam,
+    ToolParam,
+    ToolResultBlockParam,
+)
 from pydantic import BaseModel
 
 from app.config import Settings
@@ -81,19 +88,19 @@ class Analyst:
     async def answer(self, question: str) -> Answer:
         messages: list[MessageParam] = [{"role": "user", "content": question}]
         queries: list[ExecutedQuery] = []
+        system: list[TextBlockParam] = [
+            # The schema makes this prompt long and it never changes, so cache it.
+            {"type": "text", "text": self.system_prompt, "cache_control": {"type": "ephemeral"}},
+            # The model does not know what day it is. The date sits outside the cached
+            # block, so the cache survives the date changing.
+            {"type": "text", "text": f"Today's date is {date.today().isoformat()}."},
+        ]
 
         for step in range(1, self.settings.max_steps + 1):
             response = await self.client.messages.create(
                 model=self.settings.anthropic_model,
                 max_tokens=MAX_TOKENS,
-                # The schema makes this prompt long and it never changes, so cache it.
-                system=[
-                    {
-                        "type": "text",
-                        "text": self.system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
+                system=system,
                 tools=[RUN_SQL_TOOL],
                 messages=messages,
                 thinking={"type": "adaptive"},

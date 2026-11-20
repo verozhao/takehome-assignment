@@ -1,5 +1,6 @@
 """The agent loop, driven by a scripted stand-in for Claude so no network is needed."""
 
+from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
@@ -37,9 +38,11 @@ class ScriptedClaude:
     def __init__(self, *responses: SimpleNamespace) -> None:
         self.responses = list(responses)
         self.sent: list[list] = []
+        self.system: list[dict] = []
         self.messages = self  # so client.messages.create(...) lands on create() below
 
     async def create(self, **request: Any) -> SimpleNamespace:
+        self.system = request["system"]
         self.sent.append(list(request["messages"]))
         return self.responses.pop(0)
 
@@ -81,6 +84,14 @@ async def test_runs_the_query_and_returns_the_answer_with_its_trace():
     assert tool_result["tool_use_id"] == "call_1"
     assert tool_result["content"] == result.as_tool_result()
     assert tool_result["is_error"] is False
+
+
+async def test_the_model_is_told_todays_date():
+    claude = ScriptedClaude(reply("end_turn", text("It is a weekday.")))
+
+    await make_analyst(claude, FakeDatabase()).answer("What day is it?")
+
+    assert date.today().isoformat() in claude.system[-1]["text"]
 
 
 async def test_sql_error_goes_back_to_the_model_so_it_can_retry():
