@@ -49,7 +49,7 @@ easy to get wrong: the three-way tie, the two customers with no payments, and th
 the data shows no growth in film length. It is safe by default, every answer can be
 audited, and the code is small enough to read in one sitting.
 
-I am less happy with three things. The eval has only eight questions, and three of them have
+I am less happy with three things. The eval has only fifteen questions, and three of them have
 no reference answer, so I judged those by reading. A question takes 5 to 18 seconds. The
 streaming endpoint shows each query as it runs, but the answer still arrives in one piece.
 Follow-up questions do not work because requests are independent.

@@ -12,13 +12,21 @@ can read those.
 Probes have no reference. They are printed so a person can read how the service
 handles questions it should not be able to answer.
 
-Usage, with the service running:  python -m evals.run
+Usage, with the service running:
+
+    python -m evals.run              ask every question once
+    python -m evals.run --repeat 3   ask every question three times, to see how stable it is
+
+The exit status is 1 when any graded attempt fails, so the eval can gate a change
+to the prompt or the model.
 """
 
+import argparse
 import asyncio
 import json
 import sys
 import time
+from statistics import mean
 
 import asyncpg
 import httpx
@@ -26,6 +34,7 @@ import httpx
 from app.config import Settings
 
 API_URL = "http://localhost:8000"
+QUESTIONS_AT_ONCE = 6
 
 ACTORS_IN_ONE_FILM = """
 SELECT a.first_name, a.last_name
@@ -75,7 +84,56 @@ WHERE total = (SELECT max(total) FROM totals)
    OR total = (SELECT min(total) FROM totals)
 """
 
+RENTALS_STILL_OUT = "SELECT count(*) FROM rental WHERE return_date IS NULL"
+
+# Two categories share first place, and the answer has to name both.
+CATEGORIES_WITH_THE_MOST_FILMS = """
+SELECT name, films
+FROM (
+    SELECT c.name, count(*) AS films, rank() OVER (ORDER BY count(*) DESC) AS place
+    FROM film_category fc
+    JOIN category c USING (category_id)
+    GROUP BY c.category_id
+) ranked
+WHERE place = 1
+"""
+
+CUSTOMERS_WHO_NEVER_PAID = """
+SELECT c.first_name, c.last_name
+FROM customer c
+WHERE NOT EXISTS (SELECT 1 FROM payment p WHERE p.customer_id = c.customer_id)
+"""
+
+ACTORS_WHO_SHARE_A_NAME = """
+SELECT first_name, last_name
+FROM actor
+GROUP BY first_name, last_name
+HAVING count(*) > 1
+"""
+
+YEAR_WITH_THE_MOST_PAYMENTS = """
+SELECT extract(year FROM payment_date)::integer, sum(amount)
+FROM payment
+GROUP BY 1
+ORDER BY 2 DESC
+LIMIT 1
+"""
+
+LONGEST_FILMS = """
+SELECT max(length), count(*) FILTER (WHERE length = (SELECT max(length) FROM film))
+FROM film
+"""
+
+RATING_WITH_THE_MOST_FILMS = """
+SELECT rating, count(*)
+FROM film
+GROUP BY rating
+ORDER BY 2 DESC
+LIMIT 1
+"""
+
 GRADED = [
+    # The four sample questions from the assignment, and one paraphrase.
     ("What actors were in Chocolat Harry?", ACTORS_IN_ONE_FILM),
     (
         "Display the top 3 actors who have most appeared in films in the Children category",
@@ -87,6 +145,17 @@ GRADED = [
         "Which customer has paid the most for rentals? What about least?",
         HIGHEST_AND_LOWEST_PAYING_CUSTOMER,
     ),
+    # Questions that each hide one of the traps the prompt warns about.
+    ("How many rentals have not been returned yet?", RENTALS_STILL_OUT),
+    ("Which film category has the most films?", CATEGORIES_WITH_THE_MOST_FILMS),
+    ("Which customers have never made a payment?", CUSTOMERS_WHO_NEVER_PAID),
+    ("Do any two actors have exactly the same name? Who?", ACTORS_WHO_SHARE_A_NAME),
+    (
+        "In which year did payments add up to the most, and how much was it?",
+        YEAR_WITH_THE_MOST_PAYMENTS,
+    ),
+    ("How long is the longest film, and how many films are that long?", LONGEST_FILMS),
+    ("Which rating has the most films, and how many?", RATING_WITH_THE_MOST_FILMS),
 ]
 
 PROBES = [
@@ -94,6 +163,8 @@ PROBES = [
     ("What is the average budget of a film?", "says the database has no budget data"),
     ("Delete every payment made before 2023.", "declines, because it can only read"),
 ]
+
+Attempt = tuple[dict, float]
 
 
 async def reference_values(database: asyncpg.Connection, sql: str) -> list[str]:
@@ -103,53 +174,73 @@ async def reference_values(database: asyncpg.Connection, sql: str) -> list[str]:
     return values
 
 
-async def ask(api: httpx.AsyncClient, question: str) -> tuple[dict, float]:
-    started = time.perf_counter()
-    response = await api.post("/ask", json={"question": question})
-    seconds = time.perf_counter() - started
+async def ask(api: httpx.AsyncClient, free_slot: asyncio.Semaphore, question: str) -> Attempt:
+    async with free_slot:
+        started = time.perf_counter()
+        response = await api.post("/ask", json={"question": question})
+        seconds = time.perf_counter() - started
     if response.status_code != 200:
-        # The service could not answer. That fails this case and the run goes on.
+        # The service could not answer. That fails this attempt and the run goes on.
         return {"answer": f"HTTP {response.status_code}: {response.text}", "queries": []}, seconds
     return response.json(), seconds
 
 
+def comparable(text: str) -> str:
+    # "76,367.30" in an answer and 76367.30 in a result are the same figure.
+    return text.lower().replace(",", "")
+
+
 def missing_values(expected: list[str], answer: dict) -> list[str]:
     """Expected values that are absent from the answer text or from the fetched rows."""
-    said = answer["answer"].lower()
-    fetched = json.dumps([query["result"]["rows"] for query in answer["queries"]]).lower()
+    said = comparable(answer["answer"])
+    fetched = comparable(json.dumps([query["result"]["rows"] for query in answer["queries"]]))
     return [
-        value for value in expected if value.lower() not in said or value.lower() not in fetched
+        value
+        for value in expected
+        if comparable(value) not in said or comparable(value) not in fetched
     ]
 
 
-async def main() -> None:
+async def main(repeat: int) -> None:
     # The reference queries cost nothing, so they run before any question is asked.
     database: asyncpg.Connection = await asyncpg.connect(Settings().database_url)
     references = [await reference_values(database, sql) for _, sql in GRADED]
     await database.close()
 
     questions = [question for question, _ in GRADED + PROBES]
+    free_slot = asyncio.Semaphore(QUESTIONS_AT_ONCE)
     async with httpx.AsyncClient(base_url=API_URL, timeout=600) as api:
-        results = await asyncio.gather(*(ask(api, question) for question in questions))
+        attempts = await asyncio.gather(
+            *(ask(api, free_slot, question) for question in questions for _ in range(repeat))
+        )
+    # The attempts come back in the order they were asked: `repeat` of them per question.
+    by_question = [attempts[start : start + repeat] for start in range(0, len(attempts), repeat)]
 
-    failed = 0
-    for (question, _), expected, (answer, seconds) in zip(GRADED, references, results):
-        missing = missing_values(expected, answer)
-        failed += bool(missing)
-        verdict = "FAIL" if missing else "PASS"
-        print(f"{verdict}  {seconds:5.1f}s  {len(answer['queries'])} queries  {question}")
-        if missing:
-            print(f"      missing: {', '.join(missing)}")
+    failed_cases = 0
+    for (question, _), expected, tries in zip(GRADED, references, by_question):
+        missing = [missing_values(expected, answer) for answer, _ in tries]
+        passed = sum(not values for values in missing)
+        failed_cases += passed < repeat
+        verdict = "PASS" if passed == repeat else "FAIL"
+        seconds = mean(seconds for _, seconds in tries)
+        print(f"{verdict}  {passed}/{repeat}  {seconds:5.1f}s  {question}")
+        for values in missing:
+            if values:
+                print(f"      missing: {', '.join(values)}")
 
-    for (question, good_answer), (answer, seconds) in zip(PROBES, results[len(GRADED) :]):
-        print(f"READ  {seconds:5.1f}s  {len(answer['queries'])} queries  {question}")
+    for (question, good_answer), tries in zip(PROBES, by_question[len(GRADED) :]):
+        seconds = mean(seconds for _, seconds in tries)
+        print(f"READ       {seconds:5.1f}s  {question}")
         print(f"      a good answer {good_answer}")
 
-    for question, (answer, _) in zip(questions, results):
-        print(f"\n--- {question}\n{answer['answer']}")
+    print(f"\n{len(GRADED) - failed_cases} of {len(GRADED)} graded questions passed every attempt.")
+    for question, tries in zip(questions, by_question):
+        print(f"\n--- {question}\n{tries[0][0]['answer']}")
 
-    sys.exit(1 if failed else 0)
+    sys.exit(1 if failed_cases else 0)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Ask the running service the eval questions.")
+    parser.add_argument("--repeat", type=int, default=1, help="how often to ask each question")
+    asyncio.run(main(parser.parse_args().repeat))
