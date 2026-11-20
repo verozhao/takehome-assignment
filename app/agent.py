@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable, Sequence
 from datetime import date, datetime
 from typing import Literal, TypeVar
 
@@ -20,6 +20,7 @@ from anthropic.types import (
     TextBlockParam,
     ToolParam,
     ToolResultBlockParam,
+    ToolUseBlockParam,
 )
 from pydantic import BaseModel
 
@@ -96,18 +97,28 @@ class Analyst:
         self.system_prompt = system_prompt
         self.settings = settings
 
-    async def answer(self, question: str, caller: str | None = None) -> Answer:
+    async def answer(
+        self,
+        question: str,
+        caller: str | None = None,
+        earlier: Sequence[audit.AnswerRecord] = (),
+    ) -> Answer:
         """Work through the question and return the final answer."""
-        async for event in self.stream(question, caller):
+        async for event in self.stream(question, caller, earlier):
             if isinstance(event, Answer):
                 return event
         # stream() always ends with an Answer or raises, so this line is never reached.
         raise AgentError("The loop ended without an answer.")
 
     async def stream(
-        self, question: str, caller: str | None = None
+        self,
+        question: str,
+        caller: str | None = None,
+        earlier: Sequence[audit.AnswerRecord] = (),
     ) -> AsyncGenerator[ExecutedQuery | Answer, None]:
         """Work through the question, yielding each query as it finishes and the answer last.
+
+        `earlier` holds the answers this question follows up on, oldest first.
 
         Every run leaves one record in the audit file, however it ends. The record of an
         answer is written before the answer is handed over, so no answer exists without one.
@@ -122,7 +133,7 @@ class Analyst:
         outcome: Literal["answered", "declined", "failed", "cancelled"] = "cancelled"
         detail: str | None = None
         try:
-            async for event in self.work(question):
+            async for event in self.work(question, earlier):
                 if isinstance(event, Answer):
                     # Held back until its record is written, below.
                     answer, outcome = event, "answered"
@@ -153,6 +164,7 @@ class Analyst:
                     seconds=round(time.monotonic() - started, 2),
                     caller=caller,
                     question=question,
+                    follow_up_to=earlier[-1].id if earlier else None,
                     model=self.settings.anthropic_model,
                     reasoning_effort=self.settings.reasoning_effort,
                     prompt_sha256=audit.sha256(self.system_prompt),
@@ -166,9 +178,15 @@ class Analyst:
             answer.id = record_id
             yield answer
 
-    async def work(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
+    async def work(
+        self, question: str, earlier: Sequence[audit.AnswerRecord] = ()
+    ) -> AsyncGenerator[ExecutedQuery | Answer, None]:
         """The loop itself: ask the model, run the queries it wants, repeat."""
-        messages: list[MessageParam] = [{"role": "user", "content": question}]
+        # A follow-up starts from the earlier questions and answers, rebuilt from their records.
+        messages: list[MessageParam] = []
+        for turn in earlier:
+            messages.extend(as_messages(turn))
+        messages.append({"role": "user", "content": question})
         queries: list[ExecutedQuery] = []
         system: list[TextBlockParam] = [
             # The schema makes this prompt long and it never changes, so cache it.
@@ -235,6 +253,35 @@ class Analyst:
             messages.append({"role": "user", "content": tool_results})
 
         raise AgentError(f"No answer after {self.settings.max_steps} steps.")
+
+
+# Stands in for the rows of an earlier query. A record keeps the SQL and not the rows.
+ROWS_NOT_KEPT = "The rows of this result were not kept. Run the query again if you need them."
+
+
+def as_messages(turn: audit.AnswerRecord) -> list[MessageParam]:
+    """One earlier question as the model sees it again: the question, the queries that
+    ran and the answer. The rows are missing, so a follow-up queries again for its figures."""
+    # Only an answered question can be followed up on. The HTTP layer checks that.
+    assert turn.answer is not None
+    calls: list[ToolUseBlockParam] = []
+    results: list[ToolResultBlockParam] = []
+    for number, query in enumerate(turn.queries):
+        if query.error is None:
+            call_id = f"{turn.id}_{number}"
+            call = RunSqlInput(purpose=query.purpose, sql=query.sql)
+            calls.append(
+                {"type": "tool_use", "id": call_id, "name": "run_sql", "input": call.model_dump()}
+            )
+            results.append(
+                {"type": "tool_result", "tool_use_id": call_id, "content": ROWS_NOT_KEPT}
+            )
+    messages: list[MessageParam] = [{"role": "user", "content": turn.question}]
+    if calls:
+        messages.append({"role": "assistant", "content": calls})
+        messages.append({"role": "user", "content": results})
+    messages.append({"role": "assistant", "content": turn.answer})
+    return messages
 
 
 async def before(deadline: float, work: Awaitable[T]) -> T:

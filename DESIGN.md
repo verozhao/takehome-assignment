@@ -97,10 +97,13 @@ accuracy drop on multi-step SQL that the eval must measure first, and GPU operat
 model call sits in one place, `Analyst.work`, so the first step is a small model
 interface with two implementations.
 
-**Conversation memory.** The trigger is the first chat interface. The store holds each
-question, its final SQL and its answer, and code builds the earlier turns from those fields.
-I would not replay the model's raw turns or let a model write the summary. Figures in a
-follow-up should come from fresh queries, because data and permissions change between turns.
+**Conversation memory.** A first version is in: a question can name the answer it follows
+up on. The stored record holds each question, its SQL and its answer, and code builds the
+earlier turns from those fields. The model sees its earlier tool calls with a note where
+the rows were, then its earlier answer word for word. I do not replay the model's raw turns
+or let a model write a summary. Figures in a follow-up come from fresh queries, because
+data and permissions change between turns. What remains for a chat interface is a real
+store in place of the file scan, and a limit that counts tokens in place of five answers.
 
 **Long-term memory.** The glossary and the verified query library are the long-term memory
 worth having, and people review both. Memory that the model writes without review is a way

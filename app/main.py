@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The schema is read once. Restart the service after a schema change.
     schema = await database.describe_schema()
     app.state.api_keys = settings.api_keys
+    app.state.audit_log_path = settings.audit_log_path
     app.state.database = database
     app.state.schema = schema
     app.state.analyst = Analyst(
@@ -61,6 +62,8 @@ class Question(BaseModel):
     question: str = Field(
         min_length=1, max_length=2000, examples=["Which table has the most rows?"]
     )
+    # For a follow-up question: the id of the answer it continues.
+    follow_up_to: str | None = Field(default=None, pattern="^[0-9a-f]{32}$")
 
 
 def get_analyst(request: Request) -> Analyst:
@@ -92,22 +95,48 @@ def get_caller(
 
 Caller = Annotated[str | None, Depends(get_caller)]
 
+# How far back a follow-up question reaches.
+MAX_EARLIER_TURNS = 5
+
+
+def earlier_turns(
+    request: Request, follow_up_to: str | None, caller: str | None
+) -> list[audit.AnswerRecord]:
+    """The answers a follow-up question builds on, oldest first. Empty for a first question."""
+    if follow_up_to is None:
+        return []
+    turns = audit.earlier_turns(request.app.state.audit_log_path, follow_up_to, MAX_EARLIER_TURNS)
+    # A run that gave no answer, or another caller's answer, is treated as not being there.
+    if not turns or any(turn.outcome != "answered" or turn.caller != caller for turn in turns):
+        raise HTTPException(
+            status_code=404, detail="There is no answer with that id to follow up on."
+        )
+    return turns
+
 
 @app.post("/ask")
 async def ask(
-    body: Question, analyst: Annotated[Analyst, Depends(get_analyst)], caller: Caller
+    body: Question,
+    request: Request,
+    analyst: Annotated[Analyst, Depends(get_analyst)],
+    caller: Caller,
 ) -> Answer:
-    return await analyst.answer(body.question, caller)
+    earlier = earlier_turns(request, body.follow_up_to, caller)
+    return await analyst.answer(body.question, caller, earlier)
 
 
 @app.post("/ask/stream")
 async def ask_stream(
-    body: Question, analyst: Annotated[Analyst, Depends(get_analyst)], caller: Caller
+    body: Question,
+    request: Request,
+    analyst: Annotated[Analyst, Depends(get_analyst)],
+    caller: Caller,
 ) -> StreamingResponse:
     """The same result as POST /ask, as server-sent events: `started` at once, one
     `query` event when each query finishes, then one `answer` event carrying the
     full response, or one `error` event."""
-    events = server_sent_events(analyst.stream(body.question, caller))
+    earlier = earlier_turns(request, body.follow_up_to, caller)
+    events = server_sent_events(analyst.stream(body.question, caller, earlier))
     return StreamingResponse(events, media_type="text/event-stream")
 
 

@@ -92,10 +92,31 @@ Ask with `curl` as above, or open http://localhost:8000/docs.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /ask` | Takes `{"question": "..."}`, returns the answer and the queries behind it |
+| `POST /ask` | Takes `{"question": "..."}`, returns the answer and the queries behind it. Add `"follow_up_to"` to continue an earlier answer |
 | `POST /ask/stream` | The same, sent as events while the service works |
 | `GET /schema` | The schema text exactly as the model sees it |
 | `GET /health` | Checks the database connection |
+
+**Follow-up questions**
+
+Every answer carries an `id`. Send it back as `follow_up_to` and the next question
+continues that answer:
+
+```bash
+curl -s localhost:8000/ask -H 'content-type: application/json' \
+  -d '{"question": "Which customer has paid the most for rentals?"}'
+# {"id": "177df7ac6c0b4e0f8a1f5d2c3b4a5968", "answer": "Karl Seal (customer ID 526) ...
+
+curl -s localhost:8000/ask -H 'content-type: application/json' \
+  -d '{"question": "What about least?", "follow_up_to": "177df7ac6c0b4e0f8a1f5d2c3b4a5968"}'
+# {"id": "96a8102c...", "answer": "Among customers who have paid anything, Mateo Scott ...
+```
+
+The service rebuilds the earlier exchange from its stored records: each question, the SQL
+that ran and the answer. The rows are not kept, so the model has to query again for every
+figure it gives in a follow-up. Data and permissions can change between two questions, and
+a fresh query respects both. A follow-up reaches back five answers. With login on, a
+caller can only follow up on their own answers.
 
 **Login**
 
@@ -165,6 +186,7 @@ it.
   "seconds": 5.31,
   "caller": null,
   "question": "What actors were in Chocolat Harry?",
+  "follow_up_to": null,
   "model": "claude-opus-5-5",
   "reasoning_effort": "high",
   "prompt_sha256": "d58c4340a608ba251bfcb68030ec88983058cc00e0447e1e6508d1ff5b6937d7",
@@ -359,9 +381,9 @@ Four details the answers got right:
 [DESIGN.md](DESIGN.md) covers the path from here to production: what I would add, in which
 order, and what I would keep out. The limits of the code as it stands:
 
-- Each request stands alone, so follow-up questions do not work. The stored record gives
-  every answer an id, which is the natural hook: a follow-up would name the answer it
-  continues.
+- A follow-up sees the earlier questions, SQL and answers, and none of the earlier rows, so
+  it pays for its queries again. It reaches back five answers, and it finds them by scanning
+  the record file, which a real store would index.
 - `POST /ask/stream` shows each query as it finishes, but the two longest waits stay
   silent: the first model turn and the writing of the answer.
 - The schema is read once at startup.
