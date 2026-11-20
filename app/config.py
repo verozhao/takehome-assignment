@@ -2,11 +2,15 @@
 
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+MIN_API_KEY_LENGTH = 16
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # The settings hold secrets, so a failed check must not print the values it was given.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     # Both are required, so a missing value stops the service at startup
     # and not on the first question.
@@ -33,3 +37,12 @@ class Settings(BaseSettings):
     statement_timeout_ms: int = 15_000
     # For one whole question: every model call and every query together.
     request_timeout_seconds: float = 120
+
+    @field_validator("api_keys")
+    @classmethod
+    def keys_can_protect_the_service(cls, api_keys: dict[str, str]) -> dict[str, str]:
+        # An empty key is what a deploy template produces when its variable is not set.
+        # A key outside ASCII cannot arrive intact in an HTTP header.
+        if any(len(key) < MIN_API_KEY_LENGTH or not key.isascii() for key in api_keys):
+            raise ValueError(f"every API key needs at least {MIN_API_KEY_LENGTH} ASCII characters")
+        return api_keys

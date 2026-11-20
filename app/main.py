@@ -78,11 +78,13 @@ def get_caller(
     api_keys: dict[str, str] = request.app.state.api_keys
     if not api_keys:
         return None
-    presented = credentials.credentials.encode() if credentials else b""
-    for key, caller in api_keys.items():
-        # compare_digest takes the same time whether the keys match or not.
-        if secrets.compare_digest(presented, key.encode()):
-            return caller
+    # A request that presents no key is never a match, whatever keys are configured.
+    if credentials:
+        presented = credentials.credentials.encode()
+        for key, caller in api_keys.items():
+            # compare_digest takes the same time whether the keys match or not.
+            if secrets.compare_digest(presented, key.encode()):
+                return caller
     raise HTTPException(
         status_code=401,
         detail="A valid API key is required.",
