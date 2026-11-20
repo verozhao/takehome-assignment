@@ -96,15 +96,17 @@ class Analyst:
         self.system_prompt = system_prompt
         self.settings = settings
 
-    async def answer(self, question: str) -> Answer:
+    async def answer(self, question: str, caller: str | None = None) -> Answer:
         """Work through the question and return the final answer."""
-        async for event in self.stream(question):
+        async for event in self.stream(question, caller):
             if isinstance(event, Answer):
                 return event
         # stream() always ends with an Answer or raises, so this line is never reached.
         raise AgentError("The loop ended without an answer.")
 
-    async def stream(self, question: str) -> AsyncGenerator[ExecutedQuery | Answer, None]:
+    async def stream(
+        self, question: str, caller: str | None = None
+    ) -> AsyncGenerator[ExecutedQuery | Answer, None]:
         """Work through the question, yielding each query as it finishes and the answer last.
 
         Every run leaves one record in the audit file, however it ends. The record of an
@@ -149,6 +151,7 @@ class Analyst:
                     id=record_id,
                     asked_at=asked_at,
                     seconds=round(time.monotonic() - started, 2),
+                    caller=caller,
                     question=question,
                     model=self.settings.anthropic_model,
                     reasoning_effort=self.settings.reasoning_effort,

@@ -31,7 +31,9 @@ AI. In the order I would build it:
    rows. The database has to. The usual shortcut is one shared login plus row-level security
    keyed on a session setting. That is not a boundary here. I checked: the guard lets
    `SELECT set_config('app.tenant_id', '42', true)` through, as it must, because it is an
-   ordinary `SELECT`. The tenant has to be the login itself.
+   ordinary `SELECT`. The tenant has to be the login itself. The service can now ask for
+   an API key and its record names the caller. Giving each caller their own database login
+   is the step that remains.
 2. **A route for the data that leaves.** Every step sends the schema and up to 40,000
    characters of rows to an outside API. Client data needs retention and region terms with
    the model provider, or the same model hosted in the firm's own cloud account. Column
@@ -39,7 +41,7 @@ AI. In the order I would build it:
    staff password hashes, and the schema text lists only what the login may read.
 3. **A stored record of every answer.** The service appends one line per question to a
    file: the question, the model, a hash of the prompt, each SQL statement with a hash of
-   its result, the outcome and the answer. Production needs the caller in that record and
+   its result, the outcome, the answer and the caller when login is on. Production needs
    a store with retention rules in place of a file. The SQL, the error text of a failed
    query and the answer can all contain values from the data, so the record and the log
    need the same care as the data itself.

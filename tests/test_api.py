@@ -1,5 +1,5 @@
 """The HTTP layer. The analyst is replaced, so neither Postgres nor Claude is needed,
-except in the last test, which starts the real service against Pagila."""
+except in the last two tests, which start the real service against Pagila."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -18,13 +18,18 @@ from app.main import app, get_analyst
 class FakeAnalyst:
     def __init__(self, outcome: Answer | Exception) -> None:
         self.outcome = outcome
+        self.callers: list[str | None] = []
 
-    async def answer(self, question: str) -> Answer:
+    async def answer(self, question: str, caller: str | None = None) -> Answer:
+        self.callers.append(caller)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
 
-    async def stream(self, question: str) -> AsyncIterator[ExecutedQuery | Answer]:
+    async def stream(
+        self, question: str, caller: str | None = None
+    ) -> AsyncIterator[ExecutedQuery | Answer]:
+        self.callers.append(caller)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         for query in self.outcome.queries:
@@ -35,12 +40,15 @@ class FakeAnalyst:
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     # No `with` block, so the startup code that connects to Postgres does not run.
+    app.state.api_keys = {}
     yield TestClient(app)
     app.dependency_overrides.clear()
 
 
-def use_analyst(outcome: Answer | Exception) -> None:
-    app.dependency_overrides[get_analyst] = lambda: FakeAnalyst(outcome)
+def use_analyst(outcome: Answer | Exception) -> FakeAnalyst:
+    analyst = FakeAnalyst(outcome)
+    app.dependency_overrides[get_analyst] = lambda: analyst
+    return analyst
 
 
 def test_ask_returns_the_answer_and_the_queries_behind_it(client: TestClient):
@@ -112,6 +120,62 @@ def test_stream_reports_a_failure_as_an_event(client: TestClient, failure: Agent
     )
 
 
+def test_a_request_without_a_key_never_matches_an_empty_configured_key(client: TestClient):
+    # The settings refuse an empty key. This guards the comparison itself.
+    app.state.api_keys = {"": "alice"}
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+
+    no_key = client.post("/ask", json={"question": "Anything"})
+    empty_key = client.get("/schema", headers={"Authorization": "Bearer "})
+
+    assert [no_key.status_code, empty_key.status_code] == [401, 401]
+    assert analyst.callers == []
+
+
+def test_the_stream_endpoint_identifies_the_caller_too(client: TestClient):
+    app.state.api_keys = {"key-for-bob": "bob"}
+    analyst = use_analyst(Answer(answer="There are 1,000 films.", queries=[]))
+
+    response = client.post(
+        "/ask/stream",
+        json={"question": "How many films are there?"},
+        headers={"Authorization": "Bearer key-for-bob"},
+    )
+
+    assert response.status_code == 200
+    assert analyst.callers == ["bob"]
+
+
+def test_with_api_keys_set_a_request_without_a_valid_key_is_turned_away(client: TestClient):
+    app.state.api_keys = {"key-for-alice": "alice"}
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+    question = {"question": "Anything"}
+
+    no_key = client.post("/ask", json=question)
+    wrong_key = client.post("/ask", json=question, headers={"Authorization": "Bearer nope"})
+    stream = client.post("/ask/stream", json=question)
+    schema = client.get("/schema")
+
+    assert [r.status_code for r in (no_key, wrong_key, stream, schema)] == [401, 401, 401, 401]
+    assert no_key.headers["www-authenticate"] == "Bearer"
+    # Nobody without a key gets as far as the model.
+    assert analyst.callers == []
+
+
+def test_a_valid_api_key_identifies_the_caller(client: TestClient):
+    app.state.api_keys = {"key-for-alice": "alice", "key-for-bob": "bob"}
+    analyst = use_analyst(Answer(answer="There are 1,000 films.", queries=[]))
+
+    response = client.post(
+        "/ask",
+        json={"question": "How many films are there?"},
+        headers={"Authorization": "Bearer key-for-bob"},
+    )
+
+    assert response.status_code == 200
+    assert analyst.callers == ["bob"]
+
+
 @pytest.mark.parametrize("question", ["", "  \n "])
 def test_an_empty_question_is_rejected(client: TestClient, question: str):
     use_analyst(Answer(answer="unused", queries=[]))
@@ -164,9 +228,24 @@ def test_the_service_starts_and_gives_the_model_the_schema(
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")  # startup makes no call to Claude
     monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("API_KEYS", "{}")  # whatever the local .env says, login is off here
 
     with TestClient(app) as started:
         assert started.get("/health").json() == {"status": "ok"}
         schema = started.get("/schema").text
         assert "table film\n" in schema
         assert schema in app.state.analyst.system_prompt
+
+
+def test_api_keys_from_the_environment_turn_login_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("API_KEYS", '{"a-long-key-for-alice": "alice"}')
+
+    with TestClient(app) as started:
+        assert started.get("/health").status_code == 200
+        assert started.get("/schema").status_code == 401
+        with_key = started.get("/schema", headers={"Authorization": "Bearer a-long-key-for-alice"})
+        assert with_key.status_code == 200

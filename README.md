@@ -97,6 +97,20 @@ Ask with `curl` as above, or open http://localhost:8000/docs.
 | `GET /schema` | The schema text exactly as the model sees it |
 | `GET /health` | Checks the database connection |
 
+**Login**
+
+Login is optional and off by default, which suits a local demo. To turn it on, set
+`API_KEYS` to a JSON object of keys and the callers they identify:
+
+```bash
+API_KEYS='{"a-long-random-key": "alice"}'
+```
+
+`POST /ask`, `POST /ask/stream` and `GET /schema` then need the header
+`Authorization: Bearer a-long-random-key`, and the record of each answer names the caller.
+A key needs at least 16 ASCII characters. The service refuses to start with a shorter one,
+so an empty key from an unset deploy variable cannot leave it open.
+
 **If something goes wrong**
 
 - *"No tables found in database"* at startup: `DATABASE_URL` names the wrong database. See
@@ -151,6 +165,7 @@ it.
   "id": "47e8d5b6aabb4750bdba817990ecb558",
   "asked_at": "2026-11-20T10:38:07.961385-05:00",
   "seconds": 5.31,
+  "caller": null,
   "question": "What actors were in Chocolat Harry?",
   "model": "claude-opus-5-5",
   "reasoning_effort": "high",
@@ -357,9 +372,9 @@ order, and what I would keep out. The limits of the code as it stands:
   length conclusion are judged by reading. Next would be many more real questions and a
   model-based judge for the open-ended ones.
 - A large schema would need table selection, and sample values in the schema text.
-- The service has no login and no rate limiting. Anyone who can reach the port can ask, and
-  the record of an answer does not say who asked. The database login is read-only and sees
-  only granted columns, but every caller shares it.
+- Login is by API key and optional. It says who is asking and nothing more. Every caller
+  shares one database login, so there is no isolation between callers yet, and there is no
+  rate limiting.
 - Column grants decide what the model can see and read. The role script withholds one
   column as an example, the staff password hashes. A real deployment needs that review for
   every table.
