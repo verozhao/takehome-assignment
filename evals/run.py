@@ -1,13 +1,16 @@
 """Ask the running service a set of questions and check its answers.
 
-A graded case passes when every value returned by its reference SQL shows up both
-in the answer text and in the rows the agent fetched. The expected values are
-computed when the eval runs, so none of them is typed in by hand.
+A graded case has to pass two checks. Every value returned by its reference SQL must
+show up both in the answer text and in the rows the agent fetched. A judge model must
+also agree that the answer states those reference facts correctly, each attached to
+the right thing. The judge catches what the first check cannot see, such as the highest
+and the lowest swapped, or an answer that leads with a wrong figure and mentions the
+right one in passing. The expected values are computed when the eval runs, so none of
+them is typed in by hand.
 
-The check only looks for the reference values. It does not notice extra names,
-which customer is called the highest and which the lowest, or the conclusion
-drawn about film lengths. Every answer is printed at the end so that a person
-can read those.
+The judge compares the answer with the reference result and nothing else. It does not
+grade extra detail or the conclusion drawn about film lengths. Every answer is printed
+at the end so that a person can read those.
 
 Probes have no reference. They are printed so a person can read how the service
 handles questions it should not be able to answer.
@@ -24,17 +27,46 @@ to the prompt or the model.
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from statistics import mean
 
 import asyncpg
 import httpx
+from anthropic import AsyncAnthropic
 
 from app.config import Settings
 
 API_URL = "http://localhost:8000"
 QUESTIONS_AT_ONCE = 6
+
+JUDGE_MODEL = "claude-opus-5-5"
+JUDGE_MAX_TOKENS = 4_000
+JUDGE_PROMPT = """\
+You are grading an answer to a question about a database.
+
+Question:
+{question}
+
+Reference SQL, written by hand:
+{sql}
+
+Its result, which is the truth:
+{rows}
+
+Answer to grade:
+{answer}
+
+Does the answer state the facts in the reference result correctly, each attached to the \
+right thing? The highest and the lowest must not be swapped. The figure the answer gives \
+as its answer must equal the reference figure, so an answer that leads with a different \
+figure is wrong even if the reference figure appears somewhere in it. When the question can \
+be read in two ways and the answer gives both readings with clear labels, it is correct if \
+one of them matches the reference. Extra detail beyond the reference is fine, and the \
+wording and number format are free.
+
+Start your reply with one word, CORRECT or WRONG. Then give the reason in one sentence."""
 
 ACTORS_IN_ONE_FILM = """
 SELECT a.first_name, a.last_name
@@ -165,13 +197,19 @@ PROBES = [
 ]
 
 Attempt = tuple[dict, float]
+# What the judge said about one answer: whether it is correct, and why.
+Verdict = tuple[bool, str]
 
 
-async def reference_values(database: asyncpg.Connection, sql: str) -> list[str]:
-    values = [str(value) for row in await database.fetch(sql) for value in row]
-    if not values:
+async def reference_rows(database: asyncpg.Connection, sql: str) -> list[dict]:
+    rows = [dict(row) for row in await database.fetch(sql)]
+    if not rows:
         sys.exit(f"A reference query returned no rows, so nothing can be graded:\n{sql}")
-    return values
+    return rows
+
+
+def reference_values(rows: list[dict]) -> list[str]:
+    return [str(value) for row in rows for value in row.values()]
 
 
 async def ask(api: httpx.AsyncClient, free_slot: asyncio.Semaphore, question: str) -> Attempt:
@@ -190,43 +228,99 @@ def comparable(text: str) -> str:
     return text.lower().replace(",", "")
 
 
+def stands_alone(value: str, text: str) -> bool:
+    """Whether the text holds the value as a whole word or number. 10 is not in 2010 or 0.10.
+
+    An answer may give a figure more exactly than the reference does, so 115 is in 115.3.
+    """
+    pattern = rf"(?<![\w.]){re.escape(comparable(value))}(?!\w)"
+    return re.search(pattern, comparable(text)) is not None
+
+
 def missing_values(expected: list[str], answer: dict) -> list[str]:
     """Expected values that are absent from the answer text or from the fetched rows."""
-    said = comparable(answer["answer"])
-    fetched = comparable(json.dumps([query["result"]["rows"] for query in answer["queries"]]))
+    fetched = json.dumps([query["result"]["rows"] for query in answer["queries"]])
     return [
         value
         for value in expected
-        if comparable(value) not in said or comparable(value) not in fetched
+        if not stands_alone(value, answer["answer"]) or not stands_alone(value, fetched)
     ]
 
 
+async def judge(
+    claude: AsyncAnthropic,
+    free_slot: asyncio.Semaphore,
+    question: str,
+    sql: str,
+    rows: list[dict],
+    answer: str,
+) -> Verdict:
+    """Ask the judge model whether the answer states the reference facts correctly."""
+    prompt = JUDGE_PROMPT.format(
+        question=question, sql=sql.strip(), rows=json.dumps(rows, default=str), answer=answer
+    )
+    async with free_slot:
+        response = await claude.messages.create(
+            model=JUDGE_MODEL,
+            max_tokens=JUDGE_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    # The model may think first, so the reply is whatever text blocks it sent.
+    return read_verdict("".join(block.text for block in response.content if block.type == "text"))
+
+
+def read_verdict(reply: str) -> Verdict:
+    """Split the judge's reply into its verdict and its reason. Only a reply that starts
+    with CORRECT passes, so an empty or unclear reply fails the attempt."""
+    words = reply.split(maxsplit=1)
+    first_word = words[0] if words else ""
+    reason = words[1] if len(words) > 1 else ""
+    return first_word.strip("*.:,").upper() == "CORRECT", reason
+
+
 async def main(repeat: int) -> None:
+    settings = Settings()
     # The reference queries cost nothing, so they run before any question is asked.
-    database: asyncpg.Connection = await asyncpg.connect(Settings().database_url)
-    references = [await reference_values(database, sql) for _, sql in GRADED]
+    database: asyncpg.Connection = await asyncpg.connect(settings.database_url)
+    references = [await reference_rows(database, sql) for _, sql in GRADED]
     await database.close()
 
     questions = [question for question, _ in GRADED + PROBES]
     free_slot = asyncio.Semaphore(QUESTIONS_AT_ONCE)
-    async with httpx.AsyncClient(base_url=API_URL, timeout=600) as api:
+    # With login on, the service wants one of its API keys.
+    key = next(iter(settings.api_keys), None)
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    async with httpx.AsyncClient(base_url=API_URL, timeout=600, headers=headers) as api:
         attempts = await asyncio.gather(
             *(ask(api, free_slot, question) for question in questions for _ in range(repeat))
         )
     # The attempts come back in the order they were asked: `repeat` of them per question.
     by_question = [attempts[start : start + repeat] for start in range(0, len(attempts), repeat)]
 
+    claude = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    verdicts = await asyncio.gather(
+        *(
+            judge(claude, free_slot, question, sql, rows, answer["answer"])
+            for (question, sql), rows, tries in zip(GRADED, references, by_question)
+            for answer, _ in tries
+        )
+    )
+    judged = [verdicts[start : start + repeat] for start in range(0, len(verdicts), repeat)]
+
     failed_cases = 0
-    for (question, _), expected, tries in zip(GRADED, references, by_question):
+    for (question, _), rows, tries, opinions in zip(GRADED, references, by_question, judged):
+        expected = reference_values(rows)
         missing = [missing_values(expected, answer) for answer, _ in tries]
-        passed = sum(not values for values in missing)
+        passed = sum(not values and correct for values, (correct, _) in zip(missing, opinions))
         failed_cases += passed < repeat
-        verdict = "PASS" if passed == repeat else "FAIL"
+        result = "PASS" if passed == repeat else "FAIL"
         seconds = mean(seconds for _, seconds in tries)
-        print(f"{verdict}  {passed}/{repeat}  {seconds:5.1f}s  {question}")
-        for values in missing:
+        print(f"{result}  {passed}/{repeat}  {seconds:5.1f}s  {question}")
+        for values, (correct, reason) in zip(missing, opinions):
             if values:
                 print(f"      missing: {', '.join(values)}")
+            if not correct:
+                print(f"      judged wrong: {reason}")
 
     for (question, good_answer), tries in zip(PROBES, by_question[len(GRADED) :]):
         seconds = mean(seconds for _, seconds in tries)
