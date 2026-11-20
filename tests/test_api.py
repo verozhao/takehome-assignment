@@ -1,5 +1,5 @@
 """The HTTP layer. The analyst is replaced, so neither Postgres nor Claude is needed,
-except in the last test, which starts the real service against Pagila."""
+except in the last two tests, which start the real service against Pagila."""
 
 import json
 from collections.abc import AsyncIterator, Iterator, Sequence
@@ -155,6 +155,32 @@ def test_stream_reports_a_failure_as_an_event(client: TestClient, failure: Agent
     )
 
 
+def test_a_request_without_a_key_never_matches_an_empty_configured_key(client: TestClient):
+    # The settings refuse an empty key. This guards the comparison itself.
+    app.state.api_keys = {"": "alice"}
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+
+    no_key = client.post("/ask", json={"question": "Anything"})
+    empty_key = client.get("/schema", headers={"Authorization": "Bearer "})
+
+    assert [no_key.status_code, empty_key.status_code] == [401, 401]
+    assert analyst.callers == []
+
+
+def test_the_stream_endpoint_identifies_the_caller_too(client: TestClient):
+    app.state.api_keys = {"key-for-bob": "bob"}
+    analyst = use_analyst(Answer(answer="There are 1,000 films.", queries=[]))
+
+    response = client.post(
+        "/ask/stream",
+        json={"question": "How many films are there?"},
+        headers={"Authorization": "Bearer key-for-bob"},
+    )
+
+    assert response.status_code == 200
+    assert analyst.callers == ["bob"]
+
+
 def test_with_api_keys_set_a_request_without_a_valid_key_is_turned_away(client: TestClient):
     app.state.api_keys = {"key-for-alice": "alice"}
     analyst = use_analyst(Answer(answer="unused", queries=[]))
@@ -287,9 +313,24 @@ def test_the_service_starts_and_gives_the_model_the_schema(
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")  # startup makes no call to Claude
     monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("API_KEYS", "{}")  # whatever the local .env says, login is off here
 
     with TestClient(app) as started:
         assert started.get("/health").json() == {"status": "ok"}
         schema = started.get("/schema").text
         assert "table film\n" in schema
         assert schema in app.state.analyst.system_prompt
+
+
+def test_api_keys_from_the_environment_turn_login_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unused")
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("API_KEYS", '{"a-long-key-for-alice": "alice"}')
+
+    with TestClient(app) as started:
+        assert started.get("/health").status_code == 200
+        assert started.get("/schema").status_code == 401
+        with_key = started.get("/schema", headers={"Authorization": "Bearer a-long-key-for-alice"})
+        assert with_key.status_code == 200

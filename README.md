@@ -129,6 +129,8 @@ API_KEYS='{"a-long-random-key": "alice"}'
 
 `POST /ask`, `POST /ask/stream` and `GET /schema` then need the header
 `Authorization: Bearer a-long-random-key`, and the record of each answer names the caller.
+A key needs at least 16 ASCII characters. The service refuses to start with a shorter one,
+so an empty key from an unset deploy variable cannot leave it open.
 
 **If something goes wrong**
 

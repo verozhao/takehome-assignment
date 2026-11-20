@@ -41,7 +41,7 @@ AI. In the order I would build it:
    staff password hashes, and the schema text lists only what the login may read.
 3. **A stored record of every answer.** The service appends one line per question to a
    file: the question, the model, a hash of the prompt, each SQL statement with a hash of
-   its result, the outcome and the answer. Production needs the caller in that record and
+   its result, the outcome, the answer and the caller when login is on. Production needs
    a store with retention rules in place of a file. The SQL, the error text of a failed
    query and the answer can all contain values from the data, so the record and the log
    need the same care as the data itself.
