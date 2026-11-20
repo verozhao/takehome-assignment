@@ -74,6 +74,21 @@ async def test_the_model_only_sees_columns_the_role_may_read(database: Database)
     assert len(allowed.rows) == 1
 
 
+@pytest.mark.parametrize("function", ["pg_cancel_backend", "pg_terminate_backend"])
+async def test_the_role_cannot_cancel_or_end_another_session(database: Database, function: str):
+    superuser = await database.pool.fetchval(
+        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
+    )
+    if superuser:
+        pytest.skip("A superuser may signal any session.")
+
+    # Process id 0 is no session, so the call is harmless where the role script has not run.
+    refused = await database.run_query(f"SELECT {function}(0)")
+
+    # Every caller shares one login, so without this one question could end another's query.
+    assert refused.error == f"permission denied for function {function}"
+
+
 def test_application_code_knows_nothing_about_this_database():
     app_dir = Path(__file__).parent.parent / "app"
     source = "".join(path.read_text() for path in app_dir.glob("*.py")).lower()

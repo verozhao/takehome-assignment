@@ -15,6 +15,12 @@ ALTER ROLE analyst SET default_transaction_read_only = on;
 -- Some databases, Pagila among them, let every role create tables in the public schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
+-- A role may cancel or end its own sessions, and every caller shares this login, so one
+-- question could end another caller's query. This takes the two functions away from every
+-- role that is not a superuser. A role that needs them can be granted EXECUTE again.
+REVOKE EXECUTE ON FUNCTION pg_cancel_backend(integer), pg_terminate_backend(integer, bigint)
+    FROM PUBLIC;
+
 -- Specific to Pagila: keep the staff password hashes out of reach, by granting the
 -- other columns of that table one by one. The service only tells the model about
 -- columns this role may read.
