@@ -132,7 +132,7 @@ event: query
 data: {"purpose": "Compute linear trend and period comparisons of film length.", "sql": "[...]", "result": {"[...]"}}
 
 event: answer
-data: {"answer": "[...]", "queries": ["[...]"]}
+data: {"id": "[...]", "answer": "[...]", "queries": ["[...]"]}
 ```
 
 On the film length question the two queries arrived after 3.7 and 8.1 seconds and the answer
@@ -149,10 +149,11 @@ it.
 ```json
 {
   "id": "47e8d5b6aabb4750bdba817990ecb558",
-  "asked_at": "2026-11-20T15:38:07.961385Z",
+  "asked_at": "2026-11-20T10:38:07.961385-05:00",
   "seconds": 5.31,
   "question": "What actors were in Chocolat Harry?",
   "model": "claude-opus-5-5",
+  "reasoning_effort": "high",
   "prompt_sha256": "d58c4340a608ba251bfcb68030ec88983058cc00e0447e1e6508d1ff5b6937d7",
   "queries": [
     {
@@ -175,8 +176,9 @@ hash identifies the exact rules and schema text the model was given. The outcome
 `answered`, `declined`, `failed` or `cancelled`. A caller who disconnects in the middle of
 a stream is recorded as cancelled, with the queries that had run by then.
 
-The SQL text can contain names and values, so this file needs the same care as the data.
-Set its location with `AUDIT_LOG_PATH`.
+The SQL, the error text of a failed query and the answer can all contain names and values,
+so this file needs the same care as the data. A new file is readable by the service's own
+user only. Set its location with `AUDIT_LOG_PATH`.
 
 ## How it works
 
@@ -274,7 +276,7 @@ python -m evals.run    # live: needs the service running, costs about 30 cents
 
 - `tests/test_agent.py` drives the loop with a scripted stand-in for Claude: a result fed
   back, a SQL error fed back for a retry, several queries in one turn, the step limit, a
-  cut-off response, an empty response, a refusal and the event stream.
+  cut-off response, an empty response, a refusal, the event stream and the stored record.
 - `tests/test_database.py` runs against Pagila: schema rendering, JSON-safe values,
   truncation, the size cap, the timeout, and a list of writes and non-query statements that
   must be rejected. These tests send real `DELETE` and `UPDATE` statements, so run them as a

@@ -4,11 +4,13 @@ import asyncio
 import hashlib
 import json
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import anthropic
+import httpx2
 import pytest
 
 from app.agent import AgentError, Analyst, Answer, ExecutedQuery, QuestionDeclined
@@ -144,6 +146,11 @@ async def test_every_answer_leaves_a_record(tmp_path: Path):
     assert record["outcome"] == "answered"
     assert record["answer"] == "There are 1,000 films."
     assert record["prompt_sha256"] == hashlib.sha256(b"prompt").hexdigest()
+    assert record["reasoning_effort"] == "high"
+    # The time is local, so it shows the same date the model was told.
+    assert datetime.fromisoformat(record["asked_at"]).date() == date.today()
+    # Records can hold data, so nobody but the service's own user can read the file.
+    assert (tmp_path / "audit.jsonl").stat().st_mode & 0o777 == 0o600
     # The SQL is kept. The rows are not: only how many there were and a hash of them.
     assert record["queries"] == [
         {
@@ -193,6 +200,25 @@ async def test_a_failed_run_is_recorded_with_its_reason(tmp_path: Path):
     [record] = records_in(tmp_path / "audit.jsonl")
     assert record["outcome"] == "failed"
     assert "max_tokens" in record["detail"]
+
+
+async def test_a_claude_api_failure_is_recorded_as_failed(tmp_path: Path):
+    class UnreachableClaude(ScriptedClaude):
+        async def create(self, **request: Any) -> SimpleNamespace:
+            raise anthropic.APIConnectionError(
+                request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+            )
+
+    analyst = make_analyst(
+        UnreachableClaude(), FakeDatabase(), audit_log_path=tmp_path / "audit.jsonl"
+    )
+
+    with pytest.raises(anthropic.APIError):
+        await analyst.answer("Anything")
+
+    [record] = records_in(tmp_path / "audit.jsonl")
+    assert record["outcome"] == "failed"
+    assert record["answer"] is None
 
 
 async def test_a_caller_who_leaves_early_is_recorded_as_cancelled(tmp_path: Path):

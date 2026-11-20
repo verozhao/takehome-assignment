@@ -40,8 +40,9 @@ AI. In the order I would build it:
 3. **A stored record of every answer.** The service appends one line per question to a
    file: the question, the model, a hash of the prompt, each SQL statement with a hash of
    its result, the outcome and the answer. Production needs the caller in that record and
-   a store with retention rules in place of a file. The record and the log both hold SQL
-   with literal values, so both need the same care as the data.
+   a store with retention rules in place of a file. The SQL, the error text of a failed
+   query and the answer can all contain values from the data, so the record and the log
+   need the same care as the data itself.
 4. **Limits per user.** One question is bounded: ten steps, 120 seconds for all its model
    calls and queries together, and caps on rows and result size. Nothing bounds a user yet.
    Production needs rate and spend limits per caller and a cap on concurrent questions.
@@ -89,7 +90,7 @@ does not change. Inside one service that calls its own function it only adds a b
 trigger is a contract that forbids sending data to an outside provider, after hosting the
 same model in the firm's own cloud account was offered and refused. The cost is real: an
 accuracy drop on multi-step SQL that the eval must measure first, and GPU operations. The
-model call sits in one place, `Analyst.stream`, so the first step is a small model
+model call sits in one place, `Analyst.work`, so the first step is a small model
 interface with two implementations.
 
 **Conversation memory.** The trigger is the first chat interface. The store holds each

@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Literal, TypeVar
 
 from anthropic import AsyncAnthropic
@@ -111,7 +111,8 @@ class Analyst:
         answer is written before the answer is handed over, so no answer exists without one.
         """
         record_id = uuid.uuid4().hex
-        asked_at = datetime.now(UTC)
+        # Local time with its offset, so the record shows the date the model was told.
+        asked_at = datetime.now().astimezone()
         started = time.monotonic()
         queries: list[audit.QueryRecord] = []
         answer: Answer | None = None
@@ -150,6 +151,7 @@ class Analyst:
                     seconds=round(time.monotonic() - started, 2),
                     question=question,
                     model=self.settings.anthropic_model,
+                    reasoning_effort=self.settings.reasoning_effort,
                     prompt_sha256=audit.sha256(self.system_prompt),
                     queries=queries,
                     outcome=outcome,

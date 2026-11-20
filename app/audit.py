@@ -2,10 +2,12 @@
 
 One JSON line per question is appended to a file, and lines are never rewritten.
 A record holds the SQL text and a hash of each result. The rows themselves are
-not copied out of the database.
+not copied out of the database, but the SQL, the error text of a failed query
+and the answer can all contain values from it.
 """
 
 import hashlib
+import os
 from datetime import datetime
 from typing import Literal
 
@@ -28,6 +30,7 @@ class AnswerRecord(BaseModel):
     seconds: float
     question: str
     model: str
+    reasoning_effort: str
     # Identifies the exact rules and schema text the model was given.
     prompt_sha256: str
     queries: list[QueryRecord]
@@ -41,5 +44,7 @@ def sha256(text: str) -> str:
 
 
 def append(path: str, record: AnswerRecord) -> None:
-    with open(path, "a", encoding="utf-8") as file:
+    # A new file is readable by the service's own user only, because records can hold data.
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with open(descriptor, "a", encoding="utf-8") as file:
         file.write(record.model_dump_json() + "\n")
