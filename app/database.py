@@ -1,6 +1,7 @@
 """Postgres access: describe the schema for the model and run its queries read-only."""
 
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import asyncpg
@@ -25,7 +26,9 @@ SELECT cls.oid::regclass::text AS relation,
        format_type(att.atttypid, att.atttypmod) AS data_type,
        (SELECT string_agg(enumlabel, ', ' ORDER BY enumsortorder)
         FROM pg_enum
-        WHERE enumtypid = att.atttypid) AS enum_labels
+        WHERE enumtypid = att.atttypid) AS enum_labels,
+       col_description(cls.oid, att.attnum) AS column_comment,
+       obj_description(cls.oid, 'pg_class') AS relation_comment
 FROM pg_class cls
 JOIN pg_namespace ns ON ns.oid = cls.relnamespace
 JOIN pg_attribute att ON att.attrelid = cls.oid
@@ -115,17 +118,7 @@ class Database:
                 "points at the database that holds the data."
             )
 
-        blocks: dict[str, list[str]] = {}
-        for row in columns:
-            line = f"  {row['column_name']} {row['data_type']}"
-            if row["enum_labels"]:
-                line += f" (one of: {row['enum_labels']})"
-            header = f"{row['kind']} {row['relation']}"
-            blocks.setdefault(row["relation"], [header]).append(line)
-        for row in keys:
-            blocks[row["relation"]].append(f"  {row['definition']}")
-
-        return "\n\n".join("\n".join(lines) for lines in blocks.values())
+        return render_schema(columns, keys)
 
     async def run_query(self, sql: str) -> QueryResult:
         """Run one read-only query.
@@ -169,6 +162,32 @@ class Database:
             rows=json.loads(encoded),
             truncated=len(records) > self.max_rows,
         )
+
+
+def render_schema(columns: Sequence[Mapping[str, Any]], keys: Sequence[Mapping[str, Any]]) -> str:
+    """Turn catalog rows into plain text, one block per table or view.
+
+    A comment stored in the database follows its table or column after "--". That is
+    where a database says what a column means, so the model gets to read it.
+    """
+    blocks: dict[str, list[str]] = {}
+    for row in columns:
+        header = with_comment(f"{row['kind']} {row['relation']}", row["relation_comment"])
+        line = f"  {row['column_name']} {row['data_type']}"
+        if row["enum_labels"]:
+            line += f" (one of: {row['enum_labels']})"
+        blocks.setdefault(row["relation"], [header]).append(
+            with_comment(line, row["column_comment"])
+        )
+    for row in keys:
+        blocks[row["relation"]].append(f"  {row['definition']}")
+
+    return "\n\n".join("\n".join(lines) for lines in blocks.values())
+
+
+def with_comment(line: str, comment: str | None) -> str:
+    # A comment can span several lines. The schema text keeps one line per column.
+    return f"{line}  -- {' '.join(comment.split())}" if comment else line
 
 
 def reason_to_refuse(columns: list[str], parameters: tuple[asyncpg.Type, ...]) -> str | None:

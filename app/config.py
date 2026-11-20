@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     # and not on the first question.
     anthropic_api_key: str
     database_url: str
+    # A text file of reviewed definitions for terms the schema cannot explain.
+    glossary_path: str | None = None
 
     anthropic_model: str = "claude-opus-5-5"
     # How hard the model thinks before it acts.

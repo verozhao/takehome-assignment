@@ -199,6 +199,7 @@ user only. Set its location with `AUDIT_LOG_PATH`.
 1. At startup the service reads tables, views, columns, enum values and keys from
    `pg_catalog` and renders them as text. For Pagila that is about 225 lines. It lists only
    the columns the connected role may read, so grants decide what the model knows about.
+   Comments stored on tables and columns are part of that text.
 2. A question goes to Claude with that schema and a single tool, `run_sql`.
 3. Claude asks for queries. Each one is run, and the rows or the Postgres error message go
    back to Claude. Most questions take one to three queries.
@@ -257,6 +258,14 @@ values are stored before filtering, group by keys because names repeat, report t
 what a time column covers before claiming a trend. A test fails if `pagila` or one of its
 main table names appears in the service code. Each request also tells the model today's
 date, which it cannot know and which questions about recent periods depend on.
+
+**Definitions come from the business.** A schema says which columns exist and not what the
+business means by them. A definition kept in the database as a table or column comment
+reaches the model through the schema text. Terms that belong to no single column go in a
+glossary file, set with `GLOSSARY_PATH`. The file `glossary.example.md` shows two. The
+model is told to use a definition when one applies and to say so. With the example
+glossary, "How many rentals were returned late?" answered 27,750 and named the definition
+it used.
 
 **Claude Opus 5.5 with adaptive thinking at high effort.** I put accuracy first. Over three
 runs of the questions below, a question took 5 to 18 seconds. It cost 1 to 6 cents, about 3
