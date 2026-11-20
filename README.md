@@ -91,6 +91,7 @@ Ask with `curl` as above, or open http://localhost:8000/docs.
 | Endpoint | Purpose |
 |---|---|
 | `POST /ask` | Takes `{"question": "..."}`, returns the answer and the queries behind it |
+| `POST /ask/stream` | The same, sent as events while the service works |
 | `GET /schema` | The schema text exactly as the model sees it |
 | `GET /health` | Checks the database connection |
 
@@ -106,6 +107,36 @@ Ask with `curl` as above, or open http://localhost:8000/docs.
   container, with `pg_restore -U postgres -d pagila` on the two `.backup` files in
   `/docker-entrypoint-initdb.d/` and `psql -U postgres -d pagila -f` on
   `4-pg-partman-setup.sql` in the same folder.
+
+## Watching it work
+
+A question takes 5 to 18 seconds. `POST /ask/stream` shows what the service is doing in
+the meantime. It sends a `started` event at once, a `query` event when each query finishes,
+and then an `answer` event with the same body as `POST /ask`.
+
+```bash
+curl -N -s localhost:8000/ask/stream -H 'content-type: application/json' \
+  -d '{"question": "Are films getting longer over time?"}'
+```
+
+```
+event: started
+data: {}
+
+event: query
+data: {"purpose": "Check coverage of release_year and length in film table.", "sql": "[...]", "result": {"[...]"}}
+
+event: query
+data: {"purpose": "Compute linear trend and period comparisons of film length.", "sql": "[...]", "result": {"[...]"}}
+
+event: answer
+data: {"answer": "[...]", "queries": ["[...]"]}
+```
+
+On the film length question the two queries arrived after 3.7 and 8.1 seconds and the answer
+after 17.3. A failure arrives as an `error` event that carries the status `POST /ask` would
+have returned. A stream that ends without an `answer` or `error` event means the service
+itself failed.
 
 ## How it works
 
@@ -189,20 +220,20 @@ runs of the questions below, a question took 5 to 18 seconds. It cost 1 to 6 cen
 on average. The schema prompt is cached, so after the first call most input tokens are read
 from cache. Model and effort are settings.
 
-**No agent framework.** The loop is about 50 lines in `app/agent.py`. Writing it out keeps
+**No agent framework.** The loop is about 60 lines in `app/agent.py`. Writing it out keeps
 every step visible and easy to debug.
 
 ## Tests and evaluation
 
 ```bash
-pytest                 # 50 tests. Most of them need Pagila running.
+pytest                 # 54 tests. Most of them need Pagila running.
 mypy app evals         # type check
 python -m evals.run    # live: needs the service running, costs about 30 cents
 ```
 
 - `tests/test_agent.py` drives the loop with a scripted stand-in for Claude: a result fed
   back, a SQL error fed back for a retry, several queries in one turn, the step limit, a
-  cut-off response, an empty response and a refusal.
+  cut-off response, an empty response, a refusal and the event stream.
 - `tests/test_database.py` runs against Pagila: schema rendering, JSON-safe values,
   truncation, the size cap, the timeout, and a list of writes and non-query statements that
   must be rejected. These tests send real `DELETE` and `UPDATE` statements, so run them as a
@@ -244,8 +275,12 @@ Three details the answers got right:
 
 ## Limitations and next steps
 
+[DESIGN.md](DESIGN.md) covers the path from here to production: what I would add, in which
+order, and what I would keep out. The limits of the code as it stands:
+
 - Each request stands alone. Follow-up questions would need conversation state.
-- The client waits for the whole answer. Streaming the steps would make the wait easier.
+- `POST /ask/stream` shows each query as it finishes, but the two longest waits stay
+  silent: the first model turn and the writing of the answer.
 - The schema is read once at startup.
 - The eval is small, and the probes and the film length conclusion are judged by reading.
   With more time I would add more questions, a model-based judge for the open-ended ones,

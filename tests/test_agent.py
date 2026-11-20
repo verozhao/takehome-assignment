@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.agent import AgentError, Analyst, ExecutedQuery, QuestionDeclined
+from app.agent import AgentError, Analyst, Answer, ExecutedQuery, QuestionDeclined
 from app.config import Settings
 from app.database import QueryResult
 
@@ -84,6 +84,25 @@ async def test_runs_the_query_and_returns_the_answer_with_its_trace():
     assert tool_result["tool_use_id"] == "call_1"
     assert tool_result["content"] == result.as_tool_result()
     assert tool_result["is_error"] is False
+
+
+async def test_stream_yields_each_query_as_soon_as_it_finishes():
+    result = QueryResult(columns=["count"], rows=[[1000]])
+    query = ExecutedQuery(purpose="test", sql="SELECT count(*) FROM film", result=result)
+    claude = ScriptedClaude(
+        reply("tool_use", tool_use("SELECT count(*) FROM film")),
+        reply("end_turn", text("There are 1,000 films.")),
+    )
+    stream = make_analyst(claude, FakeDatabase(result)).stream("How many films are there?")
+
+    first = await anext(stream)
+
+    assert first == query
+    # The query is handed over before the model is asked again.
+    assert len(claude.sent) == 1
+    assert [event async for event in stream] == [
+        Answer(answer="There are 1,000 films.", queries=[query])
+    ]
 
 
 async def test_the_model_is_told_todays_date():
