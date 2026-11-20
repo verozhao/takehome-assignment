@@ -58,7 +58,8 @@ cd pagila && docker compose up -d && cd ..
 
 **2. Create the read-only role the service connects with**
 
-Run this from the root of this repository.
+Run this from the root of this repository. It is safe to run again, and worth doing after
+pulling a newer version, because the grants in it can change.
 
 ```bash
 docker exec -i pagila psql -U postgres -d pagila < sql/readonly_role.sql
@@ -155,7 +156,8 @@ itself failed.
 ```
 
 1. At startup the service reads tables, views, columns, enum values and keys from
-   `pg_catalog` and renders them as text. For Pagila that is about 225 lines.
+   `pg_catalog` and renders them as text. For Pagila that is about 225 lines. It lists only
+   the columns the connected role may read, so grants decide what the model knows about.
 2. A question goes to Claude with that schema and a single tool, `run_sql`.
 3. Claude asks for queries. Each one is run, and the rows or the Postgres error message go
    back to Claude. Most questions take one to three queries.
@@ -288,8 +290,9 @@ order, and what I would keep out. The limits of the code as it stands:
 - A large schema would need table selection before the main loop, plus column comments and
   sample values in the schema text.
 - The API has no authentication or rate limiting.
-- The read-only role can read every column of every table. Sensitive columns should be
-  excluded with grants.
+- Column grants decide what the model can see and read. The role script withholds one
+  column as an example, the staff password hashes. A real deployment needs that review for
+  every table.
 - Text stored in the database reaches the model. The prompt tells the model to treat it as
   data and the connection cannot write, which limits the damage. It is not a full defence
   against prompt injection.

@@ -10,7 +10,8 @@ from pydantic import BaseModel
 
 from app.config import Settings
 
-# Every table, view and materialized view on the search path, with its columns.
+# Every table, view and materialized view on the search path, with the columns the
+# connected role may read. The model is only told about what it is allowed to query.
 # Partitions are left out because their parent table already covers them, and so is
 # a materialized view that was never populated, because it cannot be queried.
 COLUMNS_SQL = """
@@ -34,10 +35,12 @@ WHERE ns.nspname = ANY (current_schemas(false))
   AND cls.relispopulated
   AND att.attnum > 0
   AND NOT att.attisdropped
+  AND has_column_privilege(cls.oid, att.attnum, 'SELECT')
 ORDER BY relation, att.attnum
 """
 
-# Primary and foreign keys, already rendered by Postgres as SQL text.
+# Primary and foreign keys, already rendered by Postgres as SQL text. A foreign key
+# is left out when the role may not read the table it points to.
 KEYS_SQL = """
 SELECT con.conrelid::regclass::text AS relation,
        pg_get_constraintdef(con.oid) AS definition
@@ -47,6 +50,8 @@ JOIN pg_namespace ns ON ns.oid = cls.relnamespace
 WHERE ns.nspname = ANY (current_schemas(false))
   AND con.contype IN ('p', 'f')
   AND NOT cls.relispartition
+  AND has_any_column_privilege(cls.oid, 'SELECT')
+  AND (con.confrelid = 0 OR has_any_column_privilege(con.confrelid, 'SELECT'))
 ORDER BY relation, con.contype DESC, definition
 """
 

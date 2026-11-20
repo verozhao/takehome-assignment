@@ -55,6 +55,24 @@ async def test_schema_spells_out_enum_values_and_quotes_odd_names(database: Data
     assert '"zip code" text' in schema
 
 
+async def test_the_model_only_sees_columns_the_role_may_read(database: Database):
+    superuser = await database.pool.fetchval(
+        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
+    )
+    if superuser:
+        pytest.skip("A superuser may read every column.")
+
+    schema = await database.describe_schema()
+    hidden = await database.run_query("SELECT password FROM staff LIMIT 1")
+    allowed = await database.run_query("SELECT username FROM staff ORDER BY staff_id LIMIT 1")
+
+    # The role script withholds one column of the staff table.
+    assert "  username text" in schema
+    assert "password" not in schema
+    assert "permission denied" in hidden.error
+    assert len(allowed.rows) == 1
+
+
 def test_application_code_knows_nothing_about_this_database():
     app_dir = Path(__file__).parent.parent / "app"
     source = "".join(path.read_text() for path in app_dir.glob("*.py")).lower()
