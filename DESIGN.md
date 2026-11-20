@@ -31,7 +31,9 @@ AI. In the order I would build it:
    rows. The database has to. The usual shortcut is one shared login plus row-level security
    keyed on a session setting. That is not a boundary here. I checked: the guard lets
    `SELECT set_config('app.tenant_id', '42', true)` through, as it must, because it is an
-   ordinary `SELECT`. The tenant has to be the login itself.
+   ordinary `SELECT`. The tenant has to be the login itself. The service can now ask for
+   an API key and its record names the caller. Giving each caller their own database login
+   is the step that remains.
 2. **A route for the data that leaves.** Every step sends the schema and up to 40,000
    characters of rows to an outside API. Client data needs retention and region terms with
    the model provider, or the same model hosted in the firm's own cloud account. Column

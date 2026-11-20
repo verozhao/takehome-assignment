@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # How hard the model thinks before it acts.
     reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
+    # API keys and the caller each one identifies, as JSON: {"a-long-random-key": "alice"}.
+    # Left empty, the service is open to anyone who can reach it.
+    api_keys: dict[str, str] = {}
+
     # One line is appended here for every question. See app/audit.py.
     audit_log_path: str = "audit.jsonl"
 

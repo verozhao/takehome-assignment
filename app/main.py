@@ -4,13 +4,15 @@ step by step, so a client can show the work while it waits."""
 
 import json
 import logging
+import secrets
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing, asynccontextmanager
 from typing import Annotated
 
 import anthropic
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import audit
@@ -32,9 +34,12 @@ CLAUDE_FAILURE = "The request to the language model failed. See the service log.
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()
     audit.ensure_writable(settings.audit_log_path)
+    if not settings.api_keys:
+        logger.warning("No API_KEYS set. Anyone who can reach this service can ask.")
     database = await Database.connect(settings)
     # The schema is read once. Restart the service after a schema change.
     schema = await database.describe_schema()
+    app.state.api_keys = settings.api_keys
     app.state.database = database
     app.state.schema = schema
     app.state.analyst = Analyst(
@@ -62,19 +67,47 @@ def get_analyst(request: Request) -> Analyst:
     return request.app.state.analyst
 
 
+bearer = HTTPBearer(auto_error=False)
+
+
+def get_caller(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> str | None:
+    """Who is asking, from the API key. None when the service runs without API keys."""
+    api_keys: dict[str, str] = request.app.state.api_keys
+    if not api_keys:
+        return None
+    presented = credentials.credentials.encode() if credentials else b""
+    for key, caller in api_keys.items():
+        # compare_digest takes the same time whether the keys match or not.
+        if secrets.compare_digest(presented, key.encode()):
+            return caller
+    raise HTTPException(
+        status_code=401,
+        detail="A valid API key is required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+Caller = Annotated[str | None, Depends(get_caller)]
+
+
 @app.post("/ask")
-async def ask(body: Question, analyst: Annotated[Analyst, Depends(get_analyst)]) -> Answer:
-    return await analyst.answer(body.question)
+async def ask(
+    body: Question, analyst: Annotated[Analyst, Depends(get_analyst)], caller: Caller
+) -> Answer:
+    return await analyst.answer(body.question, caller)
 
 
 @app.post("/ask/stream")
 async def ask_stream(
-    body: Question, analyst: Annotated[Analyst, Depends(get_analyst)]
+    body: Question, analyst: Annotated[Analyst, Depends(get_analyst)], caller: Caller
 ) -> StreamingResponse:
     """The same result as POST /ask, as server-sent events: `started` at once, one
     `query` event when each query finishes, then one `answer` event carrying the
     full response, or one `error` event."""
-    events = server_sent_events(analyst.stream(body.question))
+    events = server_sent_events(analyst.stream(body.question, caller))
     return StreamingResponse(events, media_type="text/event-stream")
 
 
@@ -105,7 +138,7 @@ def sse(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-@app.get("/schema", response_class=PlainTextResponse)
+@app.get("/schema", response_class=PlainTextResponse, dependencies=[Depends(get_caller)])
 async def schema(request: Request) -> str:
     """The schema text exactly as the model sees it."""
     return request.app.state.schema

@@ -137,11 +137,12 @@ async def test_every_answer_leaves_a_record(tmp_path: Path):
     )
     analyst = make_analyst(claude, FakeDatabase(result), audit_log_path=tmp_path / "audit.jsonl")
 
-    answer = await analyst.answer("How many films are there?")
+    answer = await analyst.answer("How many films are there?", caller="alice")
 
     [record] = records_in(tmp_path / "audit.jsonl")
     # The caller gets the id of the record, so an answer can be traced back later.
     assert record["id"] == answer.id
+    assert record["caller"] == "alice"
     assert record["question"] == "How many films are there?"
     assert record["outcome"] == "answered"
     assert record["answer"] == "There are 1,000 films."

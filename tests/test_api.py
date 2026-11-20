@@ -18,13 +18,18 @@ from app.main import app, get_analyst
 class FakeAnalyst:
     def __init__(self, outcome: Answer | Exception) -> None:
         self.outcome = outcome
+        self.callers: list[str | None] = []
 
-    async def answer(self, question: str) -> Answer:
+    async def answer(self, question: str, caller: str | None = None) -> Answer:
+        self.callers.append(caller)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
 
-    async def stream(self, question: str) -> AsyncIterator[ExecutedQuery | Answer]:
+    async def stream(
+        self, question: str, caller: str | None = None
+    ) -> AsyncIterator[ExecutedQuery | Answer]:
+        self.callers.append(caller)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         for query in self.outcome.queries:
@@ -35,12 +40,15 @@ class FakeAnalyst:
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     # No `with` block, so the startup code that connects to Postgres does not run.
+    app.state.api_keys = {}
     yield TestClient(app)
     app.dependency_overrides.clear()
 
 
-def use_analyst(outcome: Answer | Exception) -> None:
-    app.dependency_overrides[get_analyst] = lambda: FakeAnalyst(outcome)
+def use_analyst(outcome: Answer | Exception) -> FakeAnalyst:
+    analyst = FakeAnalyst(outcome)
+    app.dependency_overrides[get_analyst] = lambda: analyst
+    return analyst
 
 
 def test_ask_returns_the_answer_and_the_queries_behind_it(client: TestClient):
@@ -110,6 +118,36 @@ def test_stream_reports_a_failure_as_an_event(client: TestClient, failure: Agent
         last_event
         == f"event: error\ndata: {json.dumps({'status': status, 'detail': str(failure)})}"
     )
+
+
+def test_with_api_keys_set_a_request_without_a_valid_key_is_turned_away(client: TestClient):
+    app.state.api_keys = {"key-for-alice": "alice"}
+    analyst = use_analyst(Answer(answer="unused", queries=[]))
+    question = {"question": "Anything"}
+
+    no_key = client.post("/ask", json=question)
+    wrong_key = client.post("/ask", json=question, headers={"Authorization": "Bearer nope"})
+    stream = client.post("/ask/stream", json=question)
+    schema = client.get("/schema")
+
+    assert [r.status_code for r in (no_key, wrong_key, stream, schema)] == [401, 401, 401, 401]
+    assert no_key.headers["www-authenticate"] == "Bearer"
+    # Nobody without a key gets as far as the model.
+    assert analyst.callers == []
+
+
+def test_a_valid_api_key_identifies_the_caller(client: TestClient):
+    app.state.api_keys = {"key-for-alice": "alice", "key-for-bob": "bob"}
+    analyst = use_analyst(Answer(answer="There are 1,000 films.", queries=[]))
+
+    response = client.post(
+        "/ask",
+        json={"question": "How many films are there?"},
+        headers={"Authorization": "Bearer key-for-bob"},
+    )
+
+    assert response.status_code == 200
+    assert analyst.callers == ["bob"]
 
 
 @pytest.mark.parametrize("question", ["", "  \n "])
